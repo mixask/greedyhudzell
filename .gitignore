@@ -1,3 +1,4 @@
 .env
 token.env
 *.env
+key-script.lua
