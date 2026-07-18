@@ -2,3 +2,4 @@
 token.env
 *.env
 key-script.lua
+whitelist.json
