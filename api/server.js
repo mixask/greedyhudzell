@@ -234,3 +234,22 @@ app.listen(PORT, () => {
     console.log(`📊 Ключей в белом списке: ${loadWhitelist().keys.length}`);
     console.log(`${'='.repeat(50)}\n`);
 });
+
+// ============================================
+// 📄 ОСНОВНОЙ СКРИПТ (после ключа)
+// ============================================
+
+app.get('/scripts/raw-script.lua', (req, res) => {
+    try {
+        const scriptPath = path.join(__dirname, '..', 'scripts', 'raw-script.lua');
+        if (!fs.existsSync(scriptPath)) {
+            return res.status(404).send('-- ❌ Script not found');
+        }
+        const script = fs.readFileSync(scriptPath, 'utf8');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.send(script);
+    } catch (error) {
+        res.status(500).send('-- ❌ Error loading script');
+    }
+});
