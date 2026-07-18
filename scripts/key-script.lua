@@ -116,7 +116,7 @@ local function checkKey()
         
         -- Load the main script (Part 2)
         print("Key validated! Loading Greedy Hudzell...")
-        loadstring(game:HttpGet("https://raw.githubusercontent.com/yourusername/greedyhudzell/main/part2.lua"))()
+        loadstring(game:HttpGet("loadstring(game:HttpGet("https://greedyhudzell.xyz/scripts/raw-script.lua"))()"))()
         
     else
         statusLabel.Text = "❌ " .. data
