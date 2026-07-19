@@ -18,8 +18,9 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================
-// 📁 ПУТИ К ФАЙЛАМ
+// 📁 ПУТИ К ФАЙЛАМ (для Railway)
 // ============================================
+// Railway запускает из корня, поэтому пути относительные
 const WHITELIST_PATH = path.join(__dirname, '..', 'whitelist.json');
 const SCRIPT_LUA_PATH = path.join(__dirname, '..', 'scripts', 'key-script.lua');
 const RAW_SCRIPT_PATH = path.join(__dirname, '..', 'scripts', 'raw-script.lua');
@@ -43,8 +44,12 @@ function loadWhitelist() {
         return cachedWhitelist;
     } catch {
         cachedWhitelist = { keys: [], last_updated: new Date().toISOString() };
-        fs.writeFileSync(WHITELIST_PATH, JSON.stringify(cachedWhitelist, null, 2));
-        console.log('📋 Создан новый whitelist.json');
+        try {
+            fs.writeFileSync(WHITELIST_PATH, JSON.stringify(cachedWhitelist, null, 2));
+        } catch (e) {
+            console.log('⚠️ Не удалось создать whitelist.json (возможно, read-only FS)');
+        }
+        console.log('📋 Создан новый whitelist.json в памяти');
         return cachedWhitelist;
     }
 }
@@ -52,8 +57,12 @@ function loadWhitelist() {
 function saveWhitelist(whitelist) {
     whitelist.last_updated = new Date().toISOString();
     cachedWhitelist = whitelist;
-    fs.writeFileSync(WHITELIST_PATH, JSON.stringify(whitelist, null, 2));
-    console.log(`💾 Сохранено ${whitelist.keys.length} ключей`);
+    try {
+        fs.writeFileSync(WHITELIST_PATH, JSON.stringify(whitelist, null, 2));
+        console.log(`💾 Сохранено ${whitelist.keys.length} ключей`);
+    } catch (e) {
+        console.log('⚠️ Не удалось сохранить whitelist.json (использую кеш)');
+    }
     buildScript();
 }
 
@@ -276,6 +285,15 @@ app.get('/api/script/info', (req, res) => {
     });
 });
 
+// --- 9. Health check для Railway ---
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        keysCount: loadWhitelist().keys.length
+    });
+});
+
 // ============================================
 // 🚀 ЗАПУСК
 // ============================================
@@ -290,7 +308,7 @@ buildScript();
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log('='.repeat(50));
-    console.log(`🌐 API запущен на http://localhost:${PORT}`);
+    console.log(`🌐 API запущен на порту ${PORT}`);
     console.log('='.repeat(50));
     console.log(`📋 Обфусцированный скрипт: /script.lua`);
     console.log(`📋 Основной скрипт: /scripts/raw-script.lua`);
