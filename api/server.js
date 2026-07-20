@@ -3,7 +3,6 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-// Пытаемся загрузить обфускатор
 let JavaScriptObfuscator;
 try {
     JavaScriptObfuscator = require('javascript-obfuscator');
@@ -18,24 +17,27 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================
-// 📁 ПУТИ К ФАЙЛАМ (для Railway)
+// 📁 ПУТИ
 // ============================================
 const BASE_PATH = process.cwd();
 const WHITELIST_PATH = path.join(BASE_PATH, 'whitelist.json');
 const SCRIPT_LUA_PATH = path.join(BASE_PATH, 'scripts', 'key-script.lua');
 const RAW_SCRIPT_PATH = path.join(BASE_PATH, 'scripts', 'raw-script.lua');
 
-console.log(`📁 Базовая папка: ${BASE_PATH}`);
-console.log(`📁 whitelist.json: ${WHITELIST_PATH}`);
-console.log(`📁 key-script.lua: ${SCRIPT_LUA_PATH}`);
-console.log(`📁 raw-script.lua: ${RAW_SCRIPT_PATH}`);
-
 // ============================================
-// 📋 КЕШ В ПАМЯТИ
+// 📋 КЕШ
 // ============================================
 let cachedWhitelist = { keys: [], last_updated: new Date().toISOString() };
 let cachedScript = null;
 let scriptLastBuilt = null;
+
+// ============================================
+// 📋 ДАННЫЕ ДЛЯ САЙТА
+// ============================================
+let siteStatus = { online: true };
+let botStatus = { online: true };
+let updates = [];
+let games = [];
 
 // ============================================
 // 📋 РАБОТА С БЕЛЫМ СПИСКОМ
@@ -52,7 +54,7 @@ function loadWhitelist() {
         try {
             fs.writeFileSync(WHITELIST_PATH, JSON.stringify(cachedWhitelist, null, 2));
         } catch (e) {
-            console.log('⚠️ Не удалось создать whitelist.json (использую кеш)');
+            console.log('⚠️ Не удалось создать whitelist.json');
         }
         console.log('📋 Создан новый whitelist.json в памяти');
         return cachedWhitelist;
@@ -66,13 +68,13 @@ function saveWhitelist(whitelist) {
         fs.writeFileSync(WHITELIST_PATH, JSON.stringify(whitelist, null, 2));
         console.log(`💾 Сохранено ${whitelist.keys.length} ключей`);
     } catch (e) {
-        console.log('⚠️ Не удалось сохранить whitelist.json (использую кеш)');
+        console.log('⚠️ Не удалось сохранить whitelist.json');
     }
     buildScript();
 }
 
 // ============================================
-// 🛡️ ГЕНЕРАЦИЯ LUA СКРИПТА
+// 🛡️ ГЕНЕРАЦИЯ LUA
 // ============================================
 
 function generateLuaScript(whitelist) {
@@ -120,7 +122,6 @@ function obfuscateLuaScript(source) {
         }
     }
     
-    // Простая обфускация
     console.log('🔧 Используется простая обфускация Lua');
     let obfuscated = source;
     obfuscated = obfuscated.replace(/--[^\n]*/g, '');
@@ -161,7 +162,7 @@ function buildScript() {
 }
 
 // ============================================
-// 🚫 БЛОКИРОВКА ДОСТУПА
+// 🚫 БЛОКИРОВКА
 // ============================================
 
 app.get('/whitelist.json', (req, res) => {
@@ -173,7 +174,7 @@ app.get('/scripts/key-script.lua', (req, res) => {
 });
 
 // ============================================
-// 📋 КОМАНДЫ ОТ DISCORD БОТА (НОВЫЙ ЭНДПОИНТ)
+// 📋 КОМАНДЫ ОТ DISCORD БОТА
 // ============================================
 
 app.post('/api/command', (req, res) => {
@@ -182,24 +183,40 @@ app.post('/api/command', (req, res) => {
 
     switch (type) {
         case 'status':
+            siteStatus.online = data.online;
             console.log(`🔄 Статус сайта: ${data.online ? 'ONLINE' : 'OFFLINE'}`);
-            // Здесь можно добавить логику для сайта
             res.json({ ok: true, message: `Site is now ${data.online ? 'online' : 'offline'}` });
             break;
 
         case 'bot':
+            botStatus.online = data.online;
             console.log(`🤖 Статус бота: ${data.online ? 'ONLINE' : 'OFFLINE'}`);
             res.json({ ok: true, message: `Bot is now ${data.online ? 'online' : 'offline'}` });
             break;
 
         case 'update':
-            console.log(`📢 Новое обновление от ${data.author}: ${data.text}`);
-            res.json({ ok: true, message: 'Update added' });
+            const newUpdate = {
+                id: Date.now(),
+                author: data.author || 'бот',
+                text: data.text,
+                time: new Date().toISOString()
+            };
+            updates.unshift(newUpdate);
+            if (updates.length > 50) updates.pop();
+            console.log(`📢 Новое обновление: ${data.text}`);
+            res.json({ ok: true, message: 'Update added', update: newUpdate });
             break;
 
         case 'game':
+            const newGame = {
+                id: Date.now(),
+                name: data.name,
+                status: data.status || 'доступно',
+                added: new Date().toISOString()
+            };
+            games.push(newGame);
             console.log(`🎮 Новая игра: ${data.name} (${data.status})`);
-            res.json({ ok: true, message: `Game "${data.name}" added` });
+            res.json({ ok: true, message: `Game "${data.name}" added`, game: newGame });
             break;
 
         default:
@@ -209,19 +226,36 @@ app.post('/api/command', (req, res) => {
 });
 
 // ============================================
+// 🌐 ЭНДПОИНТЫ ДЛЯ САЙТА
+// ============================================
+
+app.get('/api/site-status', (req, res) => {
+    res.json(siteStatus);
+});
+
+app.get('/api/bot-status', (req, res) => {
+    res.json(botStatus);
+});
+
+app.get('/api/updates', (req, res) => {
+    res.json(updates);
+});
+
+app.get('/api/games', (req, res) => {
+    res.json(games);
+});
+
+// ============================================
 // 🌐 ОСНОВНЫЕ ЭНДПОИНТЫ
 // ============================================
 
-// --- 1. Обфусцированный скрипт с ключами ---
 app.get('/script.lua', (req, res) => {
     try {
         if (!cachedScript) {
             buildScript();
         }
-        
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('X-Script-Version', scriptLastBuilt || 'unknown');
         res.send(cachedScript);
     } catch (error) {
         console.error('❌ Ошибка при отправке скрипта:', error);
@@ -229,7 +263,6 @@ app.get('/script.lua', (req, res) => {
     }
 });
 
-// --- 2. Основной скрипт (raw-script.lua) ---
 app.get('/scripts/raw-script.lua', (req, res) => {
     try {
         if (!fs.existsSync(RAW_SCRIPT_PATH)) {
@@ -237,7 +270,6 @@ app.get('/scripts/raw-script.lua', (req, res) => {
         }
         const script = fs.readFileSync(RAW_SCRIPT_PATH, 'utf8');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.send(script);
     } catch (error) {
         console.error('❌ Ошибка при отправке raw-script:', error);
@@ -245,25 +277,18 @@ app.get('/scripts/raw-script.lua', (req, res) => {
     }
 });
 
-// --- 3. Проверка ключа ---
 app.get('/api/check-key/:key', (req, res) => {
     const key = req.params.key;
     const whitelist = loadWhitelist();
     const valid = whitelist.keys.includes(key);
-    res.json({ 
-        valid, 
-        key, 
-        timestamp: new Date().toISOString() 
-    });
+    res.json({ valid, key, timestamp: new Date().toISOString() });
 });
 
-// --- 4. Добавить ключ ---
 app.post('/api/whitelist/add', (req, res) => {
     const { key } = req.body;
     if (!key) {
         return res.status(400).json({ error: 'Key required' });
     }
-    
     const whitelist = loadWhitelist();
     if (!whitelist.keys.includes(key)) {
         whitelist.keys.push(key);
@@ -274,13 +299,11 @@ app.post('/api/whitelist/add', (req, res) => {
     }
 });
 
-// --- 5. Удалить ключ ---
 app.post('/api/whitelist/remove', (req, res) => {
     const { key } = req.body;
     if (!key) {
         return res.status(400).json({ error: 'Key required' });
     }
-    
     const whitelist = loadWhitelist();
     const index = whitelist.keys.indexOf(key);
     if (index > -1) {
@@ -292,27 +315,20 @@ app.post('/api/whitelist/remove', (req, res) => {
     }
 });
 
-// --- 6. Список ключей ---
 app.get('/api/whitelist/list', (req, res) => {
     const whitelist = loadWhitelist();
     res.json(whitelist);
 });
 
-// --- 7. Принудительная пересборка ---
 app.post('/api/script/rebuild', (req, res) => {
     try {
         buildScript();
-        res.json({ 
-            success: true, 
-            message: 'Script rebuilt and obfuscated',
-            keysCount: loadWhitelist().keys.length
-        });
+        res.json({ success: true, message: 'Script rebuilt', keysCount: loadWhitelist().keys.length });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// --- 8. Информация о скрипте ---
 app.get('/api/script/info', (req, res) => {
     const whitelist = loadWhitelist();
     res.json({
@@ -326,13 +342,8 @@ app.get('/api/script/info', (req, res) => {
     });
 });
 
-// --- 9. Health check для Railway ---
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        timestamp: new Date().toISOString(),
-        keysCount: loadWhitelist().keys.length
-    });
+    res.json({ status: 'OK', timestamp: new Date().toISOString(), keysCount: loadWhitelist().keys.length });
 });
 
 // ============================================
@@ -354,8 +365,10 @@ app.listen(PORT, () => {
     console.log(`📋 Обфусцированный скрипт: /script.lua`);
     console.log(`📋 Основной скрипт: /scripts/raw-script.lua`);
     console.log(`📋 Команды бота: /api/command`);
+    console.log(`📋 Статус сайта: /api/site-status`);
+    console.log(`📋 Обновления: /api/updates`);
+    console.log(`📋 Игры: /api/games`);
     console.log(`🔒 Исходный код: ЗАБЛОКИРОВАН`);
-    console.log(`🔒 whitelist.json: ЗАБЛОКИРОВАН`);
     console.log('='.repeat(50));
     console.log(`📊 Ключей в белом списке: ${loadWhitelist().keys.length}`);
     console.log('='.repeat(50));
