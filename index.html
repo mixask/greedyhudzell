@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
+  /* ===== YOUR EXACT STYLES (unchanged) ===== */
   :root {
     --bg: #05070b;
     --surface: #0c111a;
@@ -185,7 +186,6 @@
   .site-offline-overlay h2{font-size:42px; color:var(--error);}
   .site-offline-overlay p{color:var(--muted); font-size:16px;}
   
-  /* Subtle AI credit */
   .ai-credit {
     position: absolute;
     bottom: 12px;
@@ -199,12 +199,14 @@
 </style>
 </head>
 <body>
-<!-- Offline overlay -->
+
+<!-- ===== OFFLINE OVERLAY ===== -->
 <div class="site-offline-overlay" id="offline-overlay">
   <h2>⛔ Site Temporarily Unavailable</h2>
   <p>Maintenance in progress. We'll be back soon!</p>
 </div>
 
+<!-- ===== NAV ===== -->
 <nav>
   <div class="logo"><span class="dot"></span>Greedy Hudzell</div>
   <div class="tabs">
@@ -214,7 +216,7 @@
   <div class="status-pill" id="bot-status"><span class="led"></span><span id="bot-status-text">Bot Online</span></div>
 </nav>
 
-<!-- ========== HOME ========== -->
+<!-- ===== HOME ===== -->
 <div id="home-view">
   <section class="hero">
     <div class="hero-top">
@@ -228,6 +230,7 @@
   
   <section style="padding-top:0;">
     <div class="panel-grid">
+      <!-- Key Activation -->
       <div class="panel">
         <div class="panel-head">
           <h3>Key Activation</h3>
@@ -244,6 +247,7 @@
         </div>
       </div>
       
+      <!-- Updates -->
       <div class="panel">
         <div class="panel-head">
           <h3>Updates</h3>
@@ -318,7 +322,7 @@
   </section>
 </div>
 
-<!-- ========== GAMES ========== -->
+<!-- ===== GAMES ===== -->
 <div id="games-view">
   <section>
     <div>
@@ -339,27 +343,35 @@
 </footer>
 
 <script>
-/* ================= TABS ================= */
+// ============================================
+// 🚀 API URL
+// ============================================
+const API_URL = 'https://script.greedyhudzell.xyz';
+
+// ============================================
+// 📋 TABS
+// ============================================
 const tabBtns = document.querySelectorAll('.tab-btn');
 const homeView = document.getElementById('home-view');
 const gamesView = document.getElementById('games-view');
 
-tabBtns.forEach(btn=>{
-  btn.addEventListener('click', ()=>{
-    tabBtns.forEach(b=>b.classList.remove('active'));
+tabBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    tabBtns.forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
-    if(btn.dataset.tab==='home'){ 
-      homeView.style.display='block'; 
-      gamesView.style.display='none'; 
-    }
-    else { 
-      homeView.style.display='none'; 
-      gamesView.style.display='block'; 
+    if (btn.dataset.tab === 'home') {
+      homeView.style.display = 'block';
+      gamesView.style.display = 'none';
+    } else {
+      homeView.style.display = 'none';
+      gamesView.style.display = 'block';
     }
   });
 });
 
-/* ================= WORK.INK KEY SYSTEM ================= */
+// ============================================
+// 🔑 WORK.INK KEY SYSTEM
+// ============================================
 const keyInput = document.getElementById('key-input');
 const verifyBtn = document.getElementById('key-verify-btn');
 const keyStatus = document.getElementById('key-status');
@@ -382,17 +394,17 @@ verifyBtn.addEventListener('click', async () => {
     keyStatus.textContent = '❌ Please enter a key.';
     return;
   }
-  
+
   verifyBtn.disabled = true;
   verifyBtn.textContent = 'Checking...';
   keyStatus.className = '';
   keyStatus.style.display = 'none';
-  
+
   const result = await validateKey(token, false);
-  
+
   verifyBtn.disabled = false;
   verifyBtn.textContent = 'Verify';
-  
+
   if (result && result.valid) {
     keyStatus.className = 'success';
     keyStatus.textContent = `✅ Key is valid! ${result.info ? 'Created: ' + new Date(result.info.createdAt).toLocaleString() : ''}`;
@@ -406,44 +418,69 @@ keyInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') verifyBtn.click();
 });
 
-/* ================= UPDATES ================= */
+// ============================================
+// 📋 LOAD UPDATES FROM API
+// ============================================
 const updateFeedEl = document.getElementById('update-feed');
 
-function pushUpdate(author, text, time) {
-  const item = document.createElement('div');
-  item.className = 'update-item';
-  item.innerHTML = `<div class="u-meta">${author} · ${time}</div><div class="u-text">${text}</div>`;
-  updateFeedEl.prepend(item);
-  
-  while (updateFeedEl.children.length > 20) {
-    updateFeedEl.removeChild(updateFeedEl.lastChild);
+async function loadUpdates() {
+  try {
+    const response = await fetch(`${API_URL}/api/updates`);
+    const updates = await response.json();
+    
+    if (updates.length > 0) {
+      updateFeedEl.innerHTML = '';
+      updates.forEach(update => {
+        const item = document.createElement('div');
+        item.className = 'update-item';
+        const time = new Date(update.time).toLocaleString();
+        item.innerHTML = `
+          <div class="u-meta">${update.author || 'bot'} · ${time}</div>
+          <div class="u-text">${update.text}</div>
+        `;
+        updateFeedEl.appendChild(item);
+      });
+    }
+  } catch (error) {
+    console.log('Could not load updates from API');
+    // Keep default demo updates if API fails
   }
 }
 
-pushUpdate('bot#updates', 'Greedy Hudzell has been launched! 🔥', 'just now');
-pushUpdate('bot#updates', 'Work.ink key system integrated.', '1 minute ago');
+// Load updates on page load
+loadUpdates();
 
-/* ================= STATUS ================= */
-function setBotStatus(online) {
-  const pill = document.getElementById('bot-status');
-  const text = document.getElementById('bot-status-text');
-  pill.classList.toggle('offline', !online);
-  text.textContent = online ? 'Bot Online' : 'Bot Offline';
-}
-setBotStatus(true);
-
-function setSiteOnline(online) {
-  const overlay = document.getElementById('offline-overlay');
-  overlay.classList.toggle('active', !online);
-}
-setSiteOnline(true);
-
-/* ================= GAMES ================= */
-const GAMES_SOURCE = [
-  { name: 'Parkour Legacy', status: 'available' },
-];
-
+// ============================================
+// 🎮 LOAD GAMES FROM API
+// ============================================
 const gamesGrid = document.getElementById('games-grid');
+let GAMES_SOURCE = [];
+
+async function loadGames() {
+  try {
+    const response = await fetch(`${API_URL}/api/games`);
+    const games = await response.json();
+    
+    if (games.length > 0) {
+      GAMES_SOURCE = games;
+      renderGames();
+    } else {
+      // Fallback games if API returns empty
+      GAMES_SOURCE = [
+        { name: 'Parkour Legacy', status: 'available' },
+        { name: 'Blox Fruits', status: 'available' },
+      ];
+      renderGames();
+    }
+  } catch (error) {
+    console.log('Could not load games from API');
+    GAMES_SOURCE = [
+      { name: 'Parkour Legacy', status: 'available' },
+      { name: 'Blox Fruits', status: 'available' },
+    ];
+    renderGames();
+  }
+}
 
 function renderGames() {
   gamesGrid.innerHTML = '';
@@ -451,31 +488,79 @@ function renderGames() {
     const card = document.createElement('div');
     card.className = 'game-card';
     card.innerHTML = `
-      <div class="game-thumb">${g.name.slice(0,2).toUpperCase()}</div>
+      <div class="game-thumb">${g.name.slice(0, 2).toUpperCase()}</div>
       <div class="game-body">
         <div class="game-name">${g.name}</div>
-        <div class="game-status">● ${g.status}</div>
+        <div class="game-status">● ${g.status || 'available'}</div>
       </div>`;
     gamesGrid.appendChild(card);
   });
 }
-renderGames();
 
-function addGame(name, status) {
-  GAMES_SOURCE.push({ name, status });
-  renderGames();
+// Load games on page load
+loadGames();
+
+// ============================================
+// 📊 LOAD SITE & BOT STATUS
+// ============================================
+async function loadStatus() {
+  try {
+    // Site status
+    const siteResponse = await fetch(`${API_URL}/api/site-status`);
+    const siteData = await siteResponse.json();
+    setSiteOnline(siteData.online !== false);
+    
+    // Bot status
+    const botResponse = await fetch(`${API_URL}/api/bot-status`);
+    const botData = await botResponse.json();
+    setBotStatus(botData.online !== false);
+  } catch (error) {
+    console.log('Could not load status from API');
+    setSiteOnline(true);
+    setBotStatus(true);
+  }
 }
 
+function setBotStatus(online) {
+  const pill = document.getElementById('bot-status');
+  const text = document.getElementById('bot-status-text');
+  pill.classList.toggle('offline', !online);
+  text.textContent = online ? 'Bot Online' : 'Bot Offline';
+}
+
+function setSiteOnline(online) {
+  const overlay = document.getElementById('offline-overlay');
+  overlay.classList.toggle('active', !online);
+}
+
+// Load status on page load
+loadStatus();
+
+// ============================================
+// 🔄 AUTO-REFRESH EVERY 30 SECONDS
+// ============================================
+setInterval(() => {
+  loadUpdates();
+  loadGames();
+  loadStatus();
+}, 30000);
+
+// ============================================
+// 🌐 EXPOSE FUNCTIONS FOR DEBUGGING
+// ============================================
 window.GreedyHudzell = {
+  API_URL,
+  loadUpdates,
+  loadGames,
+  loadStatus,
   setSiteOnline,
   setBotStatus,
-  pushUpdate,
-  addGame,
   validateKey,
-  GAMES_SOURCE
+  GAMES_SOURCE: () => GAMES_SOURCE
 };
 
 console.log('🟡 Greedy Hudzell loaded!');
+console.log(`📡 API: ${API_URL}`);
 </script>
 </body>
 </html>
