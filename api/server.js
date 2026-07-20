@@ -199,7 +199,7 @@ app.post('/api/command', (req, res) => {
                 id: Date.now(),
                 author: data.author || 'бот',
                 text: data.text,
-                time: new Date().toISOString()
+                time: data.time || new Date().toISOString()
             };
             updates.unshift(newUpdate);
             if (updates.length > 50) updates.pop();
@@ -218,18 +218,18 @@ app.post('/api/command', (req, res) => {
             console.log(`🎮 Новая игра: ${data.name} (${data.status})`);
             res.json({ ok: true, message: `Game "${data.name}" added`, game: newGame });
             break;
-            
-            case 'game_remove':
-    const gameToRemove = data.name;
-    const initialLength = games.length;
-    games = games.filter(g => g.name !== gameToRemove);
-    if (games.length < initialLength) {
-        console.log(`🗑️ Игра "${gameToRemove}" удалена.`);
-        res.json({ ok: true, message: `Game "${gameToRemove}" removed` });
-    } else {
-        res.json({ ok: false, message: `Game "${gameToRemove}" not found` });
-    }
-    break;
+
+        case 'game_remove':
+            const gameToRemove = data.name;
+            const initialLength = games.length;
+            games = games.filter(g => g.name !== gameToRemove);
+            if (games.length < initialLength) {
+                console.log(`🗑️ Игра "${gameToRemove}" удалена.`);
+                res.json({ ok: true, message: `Game "${gameToRemove}" removed` });
+            } else {
+                res.json({ ok: false, message: `Game "${gameToRemove}" not found` });
+            }
+            break;
 
         default:
             console.log(`❌ Неизвестная команда: ${type}`);
