@@ -20,10 +20,15 @@ app.use(express.json());
 // ============================================
 // 📁 ПУТИ К ФАЙЛАМ (для Railway)
 // ============================================
-// Railway запускает из корня, поэтому пути относительные
-const WHITELIST_PATH = path.join(__dirname, '..', 'whitelist.json');
-const SCRIPT_LUA_PATH = path.join(__dirname, '..', 'scripts', 'key-script.lua');
-const RAW_SCRIPT_PATH = path.join(__dirname, '..', 'scripts', 'raw-script.lua');
+const BASE_PATH = process.cwd();
+const WHITELIST_PATH = path.join(BASE_PATH, 'whitelist.json');
+const SCRIPT_LUA_PATH = path.join(BASE_PATH, 'scripts', 'key-script.lua');
+const RAW_SCRIPT_PATH = path.join(BASE_PATH, 'scripts', 'raw-script.lua');
+
+console.log(`📁 Базовая папка: ${BASE_PATH}`);
+console.log(`📁 whitelist.json: ${WHITELIST_PATH}`);
+console.log(`📁 key-script.lua: ${SCRIPT_LUA_PATH}`);
+console.log(`📁 raw-script.lua: ${RAW_SCRIPT_PATH}`);
 
 // ============================================
 // 📋 КЕШ В ПАМЯТИ
@@ -47,7 +52,7 @@ function loadWhitelist() {
         try {
             fs.writeFileSync(WHITELIST_PATH, JSON.stringify(cachedWhitelist, null, 2));
         } catch (e) {
-            console.log('⚠️ Не удалось создать whitelist.json (возможно, read-only FS)');
+            console.log('⚠️ Не удалось создать whitelist.json (использую кеш)');
         }
         console.log('📋 Создан новый whitelist.json в памяти');
         return cachedWhitelist;
@@ -165,6 +170,42 @@ app.get('/whitelist.json', (req, res) => {
 
 app.get('/scripts/key-script.lua', (req, res) => {
     res.status(403).send('⛔ Access Denied');
+});
+
+// ============================================
+// 📋 КОМАНДЫ ОТ DISCORD БОТА (НОВЫЙ ЭНДПОИНТ)
+// ============================================
+
+app.post('/api/command', (req, res) => {
+    const { type, data } = req.body;
+    console.log(`📩 Получена команда: ${type}`, data);
+
+    switch (type) {
+        case 'status':
+            console.log(`🔄 Статус сайта: ${data.online ? 'ONLINE' : 'OFFLINE'}`);
+            // Здесь можно добавить логику для сайта
+            res.json({ ok: true, message: `Site is now ${data.online ? 'online' : 'offline'}` });
+            break;
+
+        case 'bot':
+            console.log(`🤖 Статус бота: ${data.online ? 'ONLINE' : 'OFFLINE'}`);
+            res.json({ ok: true, message: `Bot is now ${data.online ? 'online' : 'offline'}` });
+            break;
+
+        case 'update':
+            console.log(`📢 Новое обновление от ${data.author}: ${data.text}`);
+            res.json({ ok: true, message: 'Update added' });
+            break;
+
+        case 'game':
+            console.log(`🎮 Новая игра: ${data.name} (${data.status})`);
+            res.json({ ok: true, message: `Game "${data.name}" added` });
+            break;
+
+        default:
+            console.log(`❌ Неизвестная команда: ${type}`);
+            res.status(400).json({ error: 'Unknown command' });
+    }
 });
 
 // ============================================
@@ -312,6 +353,7 @@ app.listen(PORT, () => {
     console.log('='.repeat(50));
     console.log(`📋 Обфусцированный скрипт: /script.lua`);
     console.log(`📋 Основной скрипт: /scripts/raw-script.lua`);
+    console.log(`📋 Команды бота: /api/command`);
     console.log(`🔒 Исходный код: ЗАБЛОКИРОВАН`);
     console.log(`🔒 whitelist.json: ЗАБЛОКИРОВАН`);
     console.log('='.repeat(50));
