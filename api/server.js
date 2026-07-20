@@ -218,13 +218,24 @@ app.post('/api/command', (req, res) => {
             console.log(`🎮 Новая игра: ${data.name} (${data.status})`);
             res.json({ ok: true, message: `Game "${data.name}" added`, game: newGame });
             break;
+            
+            case 'game_remove':
+    const gameToRemove = data.name;
+    const initialLength = games.length;
+    games = games.filter(g => g.name !== gameToRemove);
+    if (games.length < initialLength) {
+        console.log(`🗑️ Игра "${gameToRemove}" удалена.`);
+        res.json({ ok: true, message: `Game "${gameToRemove}" removed` });
+    } else {
+        res.json({ ok: false, message: `Game "${gameToRemove}" not found` });
+    }
+    break;
 
         default:
             console.log(`❌ Неизвестная команда: ${type}`);
             res.status(400).json({ error: 'Unknown command' });
     }
 });
-
 // ============================================
 // 🌐 ЭНДПОИНТЫ ДЛЯ САЙТА
 // ============================================
