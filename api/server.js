@@ -17,12 +17,13 @@ app.use(cors());
 app.use(express.json());
 
 // ============================================
-// 📁 ПУТИ
+// 📁 ПУТИ К ФАЙЛАМ (все в папке api/)
 // ============================================
-const BASE_PATH = process.cwd();
-const WHITELIST_PATH = path.join(BASE_PATH, 'whitelist.json');
-const SCRIPT_LUA_PATH = path.join(BASE_PATH, 'scripts', 'key-script.lua');
-const RAW_SCRIPT_PATH = path.join(__dirname, 'raw-script.lua');
+const BASE_PATH = __dirname; // ← папка api/
+const WHITELIST_PATH = path.join(BASE_PATH, '..', 'whitelist.json'); // ← на уровень выше
+const SCRIPT_LUA_PATH = path.join(BASE_PATH, 'key-script.lua'); // ← в api/
+const RAW_SCRIPT_PATH = path.join(BASE_PATH, 'raw-script.lua'); // ← в api/
+const GAMES_PATH = path.join(BASE_PATH, '..', 'games.json'); // ← на уровень выше
 
 // ============================================
 // 📋 КЕШ
