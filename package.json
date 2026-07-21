@@ -1,8 +1,6 @@
 {
-  "name": "greedy-hudzell-api",
+  "name": "greedy-hudzell",
   "version": "1.0.0",
-  "description": "Greedy Hudzell API Server",
-  "main": "server.js",
   "scripts": {
     "start": "node api/server.js"
   },
