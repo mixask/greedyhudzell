@@ -116,7 +116,7 @@ local function checkKey()
         
         -- Load the main script (Part 2)
         print("Key validated! Loading Greedy Hudzell...")
-        loadstring(game:HttpGet("loadstring(game:HttpGet("https://greedyhudzell.xyz/scripts/raw-script.lua"))()"))()
+        loadstring(game:HttpGet("https://greedyhudzell.xyz/scripts/raw-script.lua"))()
         
     else
         statusLabel.Text = "❌ " .. data
@@ -132,15 +132,3 @@ local function checkKey()
         keyInput:CaptureFocus()
     end
 end
-
-submitBtn.MouseButton1Click:Connect(checkKey)
-
-keyInput.FocusLost:Connect(function(enterPressed)
-    if enterPressed then
-        checkKey()
-    end
-end)
-
-keyInput:CaptureFocus()
-
-print("🔐 Greedy Hudzell Key System loaded. Enter your key to continue.")
