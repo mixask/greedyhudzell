@@ -22,7 +22,7 @@ app.use(express.json());
 const BASE_PATH = process.cwd();
 const WHITELIST_PATH = path.join(BASE_PATH, 'whitelist.json');
 const SCRIPT_LUA_PATH = path.join(BASE_PATH, 'scripts', 'key-script.lua');
-const RAW_SCRIPT_PATH = path.join(BASE_PATH, 'scripts', 'raw-script.lua');
+const RAW_SCRIPT_PATH = path.join(__dirname, 'raw-script.lua');
 
 // ============================================
 // 📋 КЕШ
