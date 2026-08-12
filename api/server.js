@@ -263,99 +263,18 @@ app.get('/api/games', (req, res) => {
 
 app.get('/script.lua', (req, res) => {
     try {
-        if (!cachedScript) {
-            buildScript();
-        }
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.send(cachedScript);
-    } catch (error) {
-        console.error('❌ Ошибка при отправке скрипта:', error);
-        res.status(500).send('-- ❌ Error loading script');
-    }
-});
+        const script = fs.readFileSync(
+            path.join(__dirname, 'script.lua'),
+            'utf8'
+        );
 
-app.get('/scripts/raw-script.lua', (req, res) => {
-    try {
-        if (!fs.existsSync(RAW_SCRIPT_PATH)) {
-            return res.status(404).send('-- ❌ Script not found');
-        }
-        const script = fs.readFileSync(RAW_SCRIPT_PATH, 'utf8');
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
         res.send(script);
     } catch (error) {
-        console.error('❌ Ошибка при отправке raw-script:', error);
-        res.status(500).send('-- ❌ Error loading script');
+        console.error('Ошибка загрузки скрипта:', error);
+        res.status(500).send('-- Error loading script');
     }
-});
-
-app.get('/api/check-key/:key', (req, res) => {
-    const key = req.params.key;
-    const whitelist = loadWhitelist();
-    const valid = whitelist.keys.includes(key);
-    res.json({ valid, key, timestamp: new Date().toISOString() });
-});
-
-app.post('/api/whitelist/add', (req, res) => {
-    const { key } = req.body;
-    if (!key) {
-        return res.status(400).json({ error: 'Key required' });
-    }
-    const whitelist = loadWhitelist();
-    if (!whitelist.keys.includes(key)) {
-        whitelist.keys.push(key);
-        saveWhitelist(whitelist);
-        res.json({ success: true, message: `Key "${key}" added` });
-    } else {
-        res.json({ success: false, message: 'Key already in whitelist' });
-    }
-});
-
-app.post('/api/whitelist/remove', (req, res) => {
-    const { key } = req.body;
-    if (!key) {
-        return res.status(400).json({ error: 'Key required' });
-    }
-    const whitelist = loadWhitelist();
-    const index = whitelist.keys.indexOf(key);
-    if (index > -1) {
-        whitelist.keys.splice(index, 1);
-        saveWhitelist(whitelist);
-        res.json({ success: true, message: `Key "${key}" removed` });
-    } else {
-        res.json({ success: false, message: 'Key not found' });
-    }
-});
-
-app.get('/api/whitelist/list', (req, res) => {
-    const whitelist = loadWhitelist();
-    res.json(whitelist);
-});
-
-app.post('/api/script/rebuild', (req, res) => {
-    try {
-        buildScript();
-        res.json({ success: true, message: 'Script rebuilt', keysCount: loadWhitelist().keys.length });
-    } catch (error) {
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-app.get('/api/script/info', (req, res) => {
-    const whitelist = loadWhitelist();
-    res.json({
-        version: '1.0.0',
-        keysCount: whitelist.keys.length,
-        keys: whitelist.keys,
-        lastUpdated: whitelist.last_updated,
-        scriptBuilt: scriptLastBuilt,
-        scriptSize: cachedScript ? cachedScript.length : 0,
-        timestamp: new Date().toISOString()
-    });
-});
-
-app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString(), keysCount: loadWhitelist().keys.length });
 });
 
 // ============================================
