@@ -1360,14 +1360,18 @@ async function handleAdminKey(
    ========================================================= */
 
 export default {
-
   async fetch(request, env) {
-
     try {
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: corsHeaders
+        });
+      }
 
-      const url =
-        new URL(request.url);
+      const url = new URL(request.url);
 
+      // остальной твой код...
       /* -----------------------------------------
          HOME
       ----------------------------------------- */
