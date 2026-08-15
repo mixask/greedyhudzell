@@ -16,12 +16,13 @@ function json(data, status = 200, extraHeaders = {}) {
   });
 }
 
-function html(body, status = 200) {
+function html(body, status = 200, extraHeaders = {}) {
   return new Response(body, {
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      ...extraHeaders
     }
   });
 }
@@ -40,7 +41,6 @@ function getClientIP(request) {
 
 async function sha256(value) {
   const data = new TextEncoder().encode(value);
-
   const hash = await crypto.subtle.digest("SHA-256", data);
 
   return [...new Uint8Array(hash)]
@@ -94,12 +94,10 @@ function getCookie(request, name) {
   return null;
 }
 
-/*
- * Work.ink token validation.
- *
- * The endpoint supplied by Work.ink does not require us to put
- * the API secret into the request.
- */
+/* =========================================================
+   WORK.INK
+   ========================================================= */
+
 async function validateWorkInkToken(token) {
   if (!token || token.length > 500) {
     return {
@@ -108,50 +106,41 @@ async function validateWorkInkToken(token) {
     };
   }
 
-  const safeToken = encodeURIComponent(token);
+  try {
+    const safeToken = encodeURIComponent(token);
 
-  const response = await fetch(
-    `https://work.ink/_api/v2/token/isValid/${safeToken}`
-  );
+    const response = await fetch(
+      `https://work.ink/_api/v2/token/isValid/${safeToken}`
+    );
 
-  if (!response.ok) {
+    if (!response.ok) {
+      return {
+        valid: false,
+        reason: "workink_http_error"
+      };
+    }
+
+    const data = await response.json();
+
+    return {
+      valid: data.valid === true,
+      byIp: data.info?.byIp ?? data.byIp ?? null,
+      info: data.info ?? null
+    };
+
+  } catch (error) {
+    console.error("Work.ink validation error:", error);
+
     return {
       valid: false,
-      reason: "workink_http_error"
+      reason: "workink_request_failed"
     };
   }
-
-  const data = await response.json();
-
-  return {
-    valid: data.valid === true,
-    byIp: data.info?.byIp || null,
-    info: data.info || null
-  };
 }
 
-/*
- * Work.ink can return either:
- *
- * raw IPv4
- *
- * or SHA-256(IP), if Hash User IP is enabled.
- *
- * Therefore we support both.
- */
-async function verifyWorkInkIP(workData, currentIP) {
-  if (!workData.byIp || !currentIP) {
-    return false;
-  }
-
-  if (workData.byIp === currentIP) {
-    return true;
-  }
-
-  const hashedIP = await sha256(currentIP);
-
-  return workData.byIp === hashedIP;
-}
+/* =========================================================
+   DATABASE / SESSION
+   ========================================================= */
 
 async function createSession(env, ipHash) {
   const timestamp = now();
@@ -209,6 +198,12 @@ async function validSession(env, sessionId, ipHash) {
     };
   }
 
+  /*
+   * This is now our own IP protection.
+   *
+   * We don't compare against Work.ink's byIp because
+   * IPv4/IPv6 representation can differ between services.
+   */
   if (session.ip_hash !== ipHash) {
     return {
       valid: false,
@@ -222,15 +217,21 @@ async function validSession(env, sessionId, ipHash) {
   };
 }
 
+/* =========================================================
+   HTML
+   ========================================================= */
+
 function pageShell(title, content) {
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+
 <title>${title}</title>
 
 <style>
+
 * {
   box-sizing: border-box;
 }
@@ -238,34 +239,47 @@ function pageShell(title, content) {
 body {
   margin: 0;
   min-height: 100vh;
+
   display: flex;
   align-items: center;
   justify-content: center;
+
   background: #080808;
   color: #fff;
+
   font-family: Arial, sans-serif;
 }
 
 .card {
   width: min(460px, calc(100% - 32px));
+
   background: #111;
+
   border: 1px solid #292929;
   border-radius: 18px;
+
   padding: 30px;
-  box-shadow: 0 20px 60px rgba(0,0,0,.5);
+
+  box-shadow:
+    0 20px 60px rgba(0,0,0,.5);
 }
 
 .logo {
   font-size: 25px;
   font-weight: 800;
+
   letter-spacing: 1px;
+
   margin-bottom: 24px;
 }
 
 .step {
   padding: 12px 14px;
+
   border-radius: 10px;
+
   background: #181818;
+
   margin: 8px 0;
 }
 
@@ -275,55 +289,90 @@ body {
 
 button {
   width: 100%;
+
   padding: 13px;
+
   margin-top: 18px;
+
   border: 0;
   border-radius: 10px;
+
   background: #fff;
   color: #000;
+
   font-weight: 700;
+
   cursor: pointer;
 }
 
 input {
   width: 100%;
+
   padding: 13px;
+
   border-radius: 10px;
+
   border: 1px solid #333;
+
   background: #080808;
   color: #fff;
+
   outline: none;
 }
 
 label {
   display: block;
+
   margin: 20px 0 7px;
+
   font-size: 14px;
   color: #aaa;
 }
 
 .muted {
   color: #888;
+
   font-size: 13px;
+
   line-height: 1.5;
 }
+
+.error {
+  color: #ff6d6d;
+}
+
 </style>
 </head>
 
 <body>
+
 <div class="card">
 ${content}
 </div>
+
 </body>
 </html>`;
 }
 
-/* STEP 1 */
+/* =========================================================
+   STEP 1
+   ========================================================= */
 
 async function handleGetKeyToken(request, env, token) {
+
   const work = await validateWorkInkToken(token);
 
+  /*
+   * IMPORTANT:
+   *
+   * We only require Work.ink to confirm the token.
+   *
+   * We intentionally do NOT compare work.byIp
+   * with CF-Connecting-IP.
+   */
+
   if (!work.valid) {
+
     return html(
       pageShell(
         "Failed",
@@ -332,7 +381,9 @@ async function handleGetKeyToken(request, env, token) {
 
         <h2>FAILED</h2>
 
-        <p>Invalid Work.ink token.</p>
+        <p>
+          Invalid or expired Work.ink token.
+        </p>
         `
       ),
       403
@@ -341,7 +392,8 @@ async function handleGetKeyToken(request, env, token) {
 
   const currentIP = getClientIP(request);
 
-  if (!await verifyWorkInkIP(work, currentIP)) {
+  if (!currentIP) {
+
     return html(
       pageShell(
         "Failed",
@@ -350,7 +402,9 @@ async function handleGetKeyToken(request, env, token) {
 
         <h2>FAILED</h2>
 
-        <p>IP verification failed.</p>
+        <p>
+          Unable to identify your IP address.
+        </p>
         `
       ),
       403
@@ -359,24 +413,36 @@ async function handleGetKeyToken(request, env, token) {
 
   const ipHash = await sha256(currentIP);
 
-  const sessionId = await createSession(env, ipHash);
+  const sessionId =
+    await createSession(
+      env,
+      ipHash
+    );
 
   return html(
     pageShell(
       "Step 1 Complete",
       `
-      <div class="logo">${env.SITE_NAME}</div>
+      <div class="logo">
+        ${env.SITE_NAME}
+      </div>
 
       <div class="step ok">
         ✓ STEP 1 COMPLETE
       </div>
 
       <p class="muted">
+        Work.ink token verified successfully.
+      </p>
+
+      <p class="muted">
         Continue to the second required step.
       </p>
 
       <a href="/step2">
-        <button>CONTINUE TO STEP 2</button>
+        <button>
+          CONTINUE TO STEP 2
+        </button>
       </a>
       `
     ),
@@ -391,30 +457,49 @@ async function handleGetKeyToken(request, env, token) {
   );
 }
 
-/* STEP 2 */
+/* =========================================================
+   STEP 2
+   ========================================================= */
 
 async function handleStep2(request, env) {
-  const sessionId = getCookie(request, "GH_SESSION");
 
-  const currentIP = getClientIP(request);
-  const ipHash = await sha256(currentIP);
+  const sessionId =
+    getCookie(
+      request,
+      "GH_SESSION"
+    );
 
-  const result = await validSession(
-    env,
-    sessionId,
-    ipHash
-  );
+  const currentIP =
+    getClientIP(request);
 
-  if (!result.valid || result.session.step1 !== 1) {
+  const ipHash =
+    await sha256(currentIP);
+
+  const result =
+    await validSession(
+      env,
+      sessionId,
+      ipHash
+    );
+
+  if (
+    !result.valid ||
+    result.session.step1 !== 1
+  ) {
+
     return html(
       pageShell(
         "Failed",
         `
-        <div class="logo">${env.SITE_NAME}</div>
+        <div class="logo">
+          ${env.SITE_NAME}
+        </div>
 
         <h2>FAILED</h2>
 
-        <p>Please complete Step 1 first.</p>
+        <p>
+          Please complete Step 1 first.
+        </p>
         `
       ),
       403
@@ -422,12 +507,15 @@ async function handleStep2(request, env) {
   }
 
   /*
-   * Replace this URL with your actual SECOND Work.ink link.
+   * IMPORTANT:
    *
-   * The destination of that Work.ink link must be:
+   * This must be your SECOND Work.ink link.
+   *
+   * Its destination must be:
    *
    * https://greedyhudzell.xyz/finish?token={TOKEN}
    */
+
   const secondWorkInkLink =
     "https://work.ink/28wp/greedy-hudzell-12";
 
@@ -435,7 +523,9 @@ async function handleStep2(request, env) {
     pageShell(
       "Step 2",
       `
-      <div class="logo">${env.SITE_NAME}</div>
+      <div class="logo">
+        ${env.SITE_NAME}
+      </div>
 
       <div class="step ok">
         ✓ STEP 1 COMPLETE
@@ -446,76 +536,98 @@ async function handleStep2(request, env) {
       </p>
 
       <a href="${secondWorkInkLink}">
-        <button>CONTINUE TO STEP 2</button>
+        <button>
+          CONTINUE TO STEP 2
+        </button>
       </a>
       `
     )
   );
 }
 
-/* FINISH */
+/* =========================================================
+   FINISH
+   ========================================================= */
 
 async function handleFinish(request, env, token) {
-  const sessionId = getCookie(request, "GH_SESSION");
 
-  const currentIP = getClientIP(request);
-  const ipHash = await sha256(currentIP);
+  const sessionId =
+    getCookie(
+      request,
+      "GH_SESSION"
+    );
 
-  const sessionResult = await validSession(
-    env,
-    sessionId,
-    ipHash
-  );
+  const currentIP =
+    getClientIP(request);
+
+  const ipHash =
+    await sha256(currentIP);
+
+  const sessionResult =
+    await validSession(
+      env,
+      sessionId,
+      ipHash
+    );
 
   if (!sessionResult.valid) {
+
     return html(
       pageShell(
         "Failed",
         `
-        <div class="logo">${env.SITE_NAME}</div>
+        <div class="logo">
+          ${env.SITE_NAME}
+        </div>
 
         <h2>FAILED</h2>
 
-        <p>Please complete Step 1 first.</p>
+        <p>
+          Your session is invalid or expired.
+        </p>
         `
       ),
       403
     );
   }
 
-  const work = await validateWorkInkToken(token);
+  /*
+   * Validate SECOND Work.ink token.
+   */
+
+  const work =
+    await validateWorkInkToken(token);
 
   if (!work.valid) {
+
     return html(
       pageShell(
         "Failed",
         `
-        <div class="logo">${env.SITE_NAME}</div>
+        <div class="logo">
+          ${env.SITE_NAME}
+        </div>
 
         <h2>FAILED</h2>
 
-        <p>Invalid Work.ink Step 2 token.</p>
+        <p>
+          Invalid Work.ink Step 2 token.
+        </p>
         `
       ),
       403
     );
   }
 
-  if (!await verifyWorkInkIP(work, currentIP)) {
-    return html(
-      pageShell(
-        "Failed",
-        `
-        <div class="logo">${env.SITE_NAME}</div>
-
-        <h2>FAILED</h2>
-
-        <p>IP verification failed.</p>
-        `
-      ),
-      403
-    );
-  }
+  /*
+   * Again:
+   *
+   * We trust Work.ink's token validation,
+   * but do not use its byIp field.
+   *
+   * Our own session already binds this browser
+   * to the IP from Step 1.
+   */
 
   await env.DB.prepare(`
     UPDATE sessions
@@ -529,7 +641,9 @@ async function handleFinish(request, env, token) {
     pageShell(
       "Key Generator",
       `
-      <div class="logo">${env.SITE_NAME}</div>
+      <div class="logo">
+        ${env.SITE_NAME}
+      </div>
 
       <div class="step ok">
         ✓ STEP 1 COMPLETE
@@ -539,7 +653,9 @@ async function handleFinish(request, env, token) {
         ✓ STEP 2 COMPLETE
       </div>
 
-      <label>Roblox username</label>
+      <label>
+        Roblox username
+      </label>
 
       <input
         id="username"
@@ -555,65 +671,124 @@ async function handleFinish(request, env, token) {
       <p id="result" class="muted"></p>
 
       <script>
+
       async function generateKey() {
+
         const username =
-          document.getElementById("username").value.trim();
+          document
+            .getElementById("username")
+            .value
+            .trim();
 
         const result =
-          document.getElementById("result");
+          document
+            .getElementById("result");
 
         if (!username) {
-          result.textContent = "Enter your Roblox username.";
-          return;
-        }
 
-        result.textContent = "Generating...";
-
-        const response = await fetch("/generate-key", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ username })
-        });
-
-        const data = await response.json();
-
-        if (!data.success) {
           result.textContent =
-            data.reason || "Failed to generate key.";
+            "Enter your Roblox username.";
+
           return;
         }
 
-        result.innerHTML =
-          "Your key:<br><br>" +
-          "<strong>" + data.key + "</strong>";
+        result.textContent =
+          "Generating...";
+
+        try {
+
+          const response =
+            await fetch(
+              "/generate-key",
+              {
+                method: "POST",
+
+                headers: {
+                  "Content-Type":
+                    "application/json"
+                },
+
+                body:
+                  JSON.stringify({
+                    username
+                  })
+              }
+            );
+
+          const data =
+            await response.json();
+
+          if (!data.success) {
+
+            result.textContent =
+              data.reason ||
+              "Failed to generate key.";
+
+            return;
+          }
+
+          result.innerHTML =
+            "Your key:<br><br>" +
+            "<strong>" +
+            data.key +
+            "</strong>";
+
+        } catch {
+
+          result.textContent =
+            "Network error.";
+        }
       }
+
       </script>
       `
     )
   );
 }
 
-/* GENERATE KEY */
+/* =========================================================
+   GENERATE KEY
+   ========================================================= */
 
 async function handleGenerateKey(request, env) {
-  const sessionId = getCookie(request, "GH_SESSION");
 
-  const currentIP = getClientIP(request);
-  const ipHash = await sha256(currentIP);
+  const sessionId =
+    getCookie(
+      request,
+      "GH_SESSION"
+    );
 
-  const sessionResult = await validSession(
-    env,
-    sessionId,
-    ipHash
-  );
+  const currentIP =
+    getClientIP(request);
 
-  if (!sessionResult.valid) {
+  if (!currentIP) {
+
     return json(
       {
         success: false,
-        reason: sessionResult.reason
+        reason: "ip_unavailable"
+      },
+      403
+    );
+  }
+
+  const ipHash =
+    await sha256(currentIP);
+
+  const sessionResult =
+    await validSession(
+      env,
+      sessionId,
+      ipHash
+    );
+
+  if (!sessionResult.valid) {
+
+    return json(
+      {
+        success: false,
+        reason:
+          sessionResult.reason
       },
       403
     );
@@ -623,6 +798,7 @@ async function handleGenerateKey(request, env) {
     sessionResult.session.step1 !== 1 ||
     sessionResult.session.step2 !== 1
   ) {
+
     return json(
       {
         success: false,
@@ -635,8 +811,12 @@ async function handleGenerateKey(request, env) {
   let body;
 
   try {
-    body = await request.json();
+
+    body =
+      await request.json();
+
   } catch {
+
     return json(
       {
         success: false,
@@ -651,16 +831,12 @@ async function handleGenerateKey(request, env) {
       ? body.username.trim()
       : "";
 
-  /*
-   * Roblox usernames are limited to 20 characters.
-   *
-   * This does NOT prove ownership of the Roblox account.
-   */
   if (
     username.length < 3 ||
     username.length > 20 ||
     !/^[A-Za-z0-9_]+$/.test(username)
   ) {
+
     return json(
       {
         success: false,
@@ -670,9 +846,35 @@ async function handleGenerateKey(request, env) {
     );
   }
 
-  const key = generateKey();
+  /*
+   * Prevent multiple keys from being generated
+   * from the same session.
+   */
 
-  const timestamp = now();
+  const existing =
+    await env.DB.prepare(`
+      SELECT key
+      FROM keys
+      WHERE session_id = ?
+      LIMIT 1
+    `)
+      .bind(sessionId)
+      .first();
+
+  if (existing) {
+
+    return json({
+      success: true,
+      key: existing.key,
+      already_generated: true
+    });
+  }
+
+  const key =
+    generateKey();
+
+  const timestamp =
+    now();
 
   await env.DB.prepare(`
     INSERT INTO keys
@@ -701,14 +903,19 @@ async function handleGenerateKey(request, env) {
   return json({
     success: true,
     key,
-    expires_at: timestamp + KEY_TTL
+    expires_at:
+      timestamp + KEY_TTL
   });
 }
 
-/* VALIDATE */
+/* =========================================================
+   LUA VALIDATION
+   ========================================================= */
 
 async function handleValidate(request, env) {
+
   if (request.method !== "POST") {
+
     return json(
       {
         valid: false,
@@ -721,8 +928,12 @@ async function handleValidate(request, env) {
   let body;
 
   try {
-    body = await request.json();
+
+    body =
+      await request.json();
+
   } catch {
+
     return json(
       {
         valid: false,
@@ -743,22 +954,26 @@ async function handleValidate(request, env) {
       : "";
 
   if (!key || !username) {
+
     return json({
       valid: false,
-      reason: "missing_key_or_username"
+      reason:
+        "missing_key_or_username"
     });
   }
 
-  const record = await env.DB.prepare(`
-    SELECT *
-    FROM keys
-    WHERE key = ?
-    LIMIT 1
-  `)
-    .bind(key)
-    .first();
+  const record =
+    await env.DB.prepare(`
+      SELECT *
+      FROM keys
+      WHERE key = ?
+      LIMIT 1
+    `)
+      .bind(key)
+      .first();
 
   if (!record) {
+
     return json({
       valid: false,
       reason: "invalid_key"
@@ -766,6 +981,7 @@ async function handleValidate(request, env) {
   }
 
   if (record.revoked === 1) {
+
     return json({
       valid: false,
       reason: "revoked"
@@ -773,6 +989,7 @@ async function handleValidate(request, env) {
   }
 
   if (record.expires_at <= now()) {
+
     return json({
       valid: false,
       reason: "expired"
@@ -780,13 +997,15 @@ async function handleValidate(request, env) {
   }
 
   if (record.username !== username) {
+
     return json({
       valid: false,
       reason: "username_mismatch"
     });
   }
 
-  const timestamp = now();
+  const timestamp =
+    now();
 
   await env.DB.prepare(`
     UPDATE keys
@@ -794,7 +1013,10 @@ async function handleValidate(request, env) {
         last_execution = ?
     WHERE key = ?
   `)
-    .bind(timestamp, key)
+    .bind(
+      timestamp,
+      key
+    )
     .run();
 
   return json({
@@ -802,10 +1024,16 @@ async function handleValidate(request, env) {
   });
 }
 
-/* ADMIN AUTH */
+/* =========================================================
+   ADMIN AUTH
+   ========================================================= */
 
 function adminAuthorized(request, env) {
-  const auth = request.headers.get("Authorization");
+
+  const auth =
+    request.headers.get(
+      "Authorization"
+    );
 
   if (!auth) {
     return false;
@@ -815,103 +1043,39 @@ function adminAuthorized(request, env) {
     return false;
   }
 
-  const provided = auth.slice(7);
+  const provided =
+    auth.slice(7);
 
-  return provided === env.ADMIN_SECRET;
-}
-
-/* ADMIN LIST */
-
-async function handleAdminKeys(request, env, rotation) {
-  if (!adminAuthorized(request, env)) {
-    return json(
-      {
-        error: "Unauthorized"
-      },
-      401
-    );
-  }
-
-  const expectedRotation =
-    await createRotationToken(env);
-
-  if (rotation !== expectedRotation) {
-    return json(
-      {
-        error: "Invalid rotation"
-      },
-      403
-    );
-  }
-
-  const url = new URL(request.url);
-
-  const search =
-    url.searchParams.get("search")?.trim() || "";
-
-  let result;
-
-  if (search) {
-    result = await env.DB.prepare(`
-      SELECT *
-      FROM keys
-      WHERE key LIKE ?
-         OR username LIKE ?
-      ORDER BY created_at DESC
-    `)
-      .bind(
-        `%${search}%`,
-        `%${search}%`
-      )
-      .all();
-  } else {
-    result = await env.DB.prepare(`
-      SELECT *
-      FROM keys
-      ORDER BY created_at DESC
-    `)
-      .all();
-  }
-
-  return json({
-    keys: result.results.map(key => ({
-      key: key.key,
-      username: key.username,
-      executed: key.executed === 1,
-      last_execution: key.last_execution,
-      created_at: key.created_at,
-      expires_at: key.expires_at,
-      revoked: key.revoked === 1,
-      status:
-        key.revoked === 1
-          ? "REVOKED"
-          : key.expires_at <= now()
-            ? "EXPIRED"
-            : "ACTIVE"
-    }))
-  });
-}
-
-/*
- * Rotation changes every 10 minutes.
- *
- * This uses HMAC-SHA256 instead of putting a plain
- * secret into the URL.
- */
-async function createRotationToken(env) {
-  const interval =
-    Math.floor(Date.now() / 1000 / 600);
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(env.ROTATION_SECRET),
-    {
-      name: "HMAC",
-      hash: "SHA-256"
-    },
-    false,
-    ["sign"]
+  return (
+    provided ===
+    env.ADMIN_SECRET
   );
+}
+
+/* =========================================================
+   ROTATION TOKEN
+   ========================================================= */
+
+async function createRotationToken(env) {
+
+  const interval =
+    Math.floor(
+      Date.now() / 1000 / 600
+    );
+
+  const key =
+    await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(
+        env.ROTATION_SECRET
+      ),
+      {
+        name: "HMAC",
+        hash: "SHA-256"
+      },
+      false,
+      ["sign"]
+    );
 
   const signature =
     await crypto.subtle.sign(
@@ -929,10 +1093,120 @@ async function createRotationToken(env) {
     .join("");
 }
 
-/* ADMIN REVOKE */
+/* =========================================================
+   ADMIN LIST
+   ========================================================= */
 
-async function handleAdminRevoke(request, env) {
+async function handleAdminKeys(
+  request,
+  env,
+  rotation
+) {
+
   if (!adminAuthorized(request, env)) {
+
+    return json(
+      {
+        error: "Unauthorized"
+      },
+      401
+    );
+  }
+
+  const expectedRotation =
+    await createRotationToken(env);
+
+  if (
+    rotation !== expectedRotation
+  ) {
+
+    return json(
+      {
+        error: "Invalid rotation"
+      },
+      403
+    );
+  }
+
+  const url =
+    new URL(request.url);
+
+  const search =
+    url.searchParams
+      .get("search")
+      ?.trim() || "";
+
+  let result;
+
+  if (search) {
+
+    result =
+      await env.DB.prepare(`
+        SELECT *
+        FROM keys
+        WHERE key LIKE ?
+           OR username LIKE ?
+        ORDER BY created_at DESC
+      `)
+        .bind(
+          `%${search}%`,
+          `%${search}%`
+        )
+        .all();
+
+  } else {
+
+    result =
+      await env.DB.prepare(`
+        SELECT *
+        FROM keys
+        ORDER BY created_at DESC
+      `)
+        .all();
+  }
+
+  return json({
+    keys:
+      result.results.map(key => ({
+        key: key.key,
+        username: key.username,
+
+        executed:
+          key.executed === 1,
+
+        last_execution:
+          key.last_execution,
+
+        created_at:
+          key.created_at,
+
+        expires_at:
+          key.expires_at,
+
+        revoked:
+          key.revoked === 1,
+
+        status:
+          key.revoked === 1
+            ? "REVOKED"
+            : key.expires_at <= now()
+              ? "EXPIRED"
+              : "ACTIVE"
+      }))
+  });
+}
+
+/* =========================================================
+   ADMIN REVOKE
+   ========================================================= */
+
+async function handleAdminRevoke(
+  request,
+  env
+) {
+
+  if (!adminAuthorized(request, env)) {
+
     return json(
       {
         success: false,
@@ -945,8 +1219,12 @@ async function handleAdminRevoke(request, env) {
   let body;
 
   try {
-    body = await request.json();
+
+    body =
+      await request.json();
+
   } catch {
+
     return json(
       {
         success: false,
@@ -962,6 +1240,7 @@ async function handleAdminRevoke(request, env) {
       : "";
 
   if (!key) {
+
     return json(
       {
         success: false,
@@ -971,15 +1250,17 @@ async function handleAdminRevoke(request, env) {
     );
   }
 
-  const result = await env.DB.prepare(`
-    UPDATE keys
-    SET revoked = 1
-    WHERE key = ?
-  `)
-    .bind(key)
-    .run();
+  const result =
+    await env.DB.prepare(`
+      UPDATE keys
+      SET revoked = 1
+      WHERE key = ?
+    `)
+      .bind(key)
+      .run();
 
   if (!result.meta.changes) {
+
     return json(
       {
         success: false,
@@ -994,10 +1275,18 @@ async function handleAdminRevoke(request, env) {
   });
 }
 
-/* ADMIN KEY INFO */
+/* =========================================================
+   ADMIN KEY INFO
+   ========================================================= */
 
-async function handleAdminKey(request, env, key) {
+async function handleAdminKey(
+  request,
+  env,
+  key
+) {
+
   if (!adminAuthorized(request, env)) {
+
     return json(
       {
         error: "Unauthorized"
@@ -1006,16 +1295,18 @@ async function handleAdminKey(request, env, key) {
     );
   }
 
-  const record = await env.DB.prepare(`
-    SELECT *
-    FROM keys
-    WHERE key = ?
-    LIMIT 1
-  `)
-    .bind(key)
-    .first();
+  const record =
+    await env.DB.prepare(`
+      SELECT *
+      FROM keys
+      WHERE key = ?
+      LIMIT 1
+    `)
+      .bind(key)
+      .first();
 
   if (!record) {
+
     return json(
       {
         error: "Key not found"
@@ -1026,13 +1317,28 @@ async function handleAdminKey(request, env, key) {
 
   return json({
     key: record.key,
-    username: record.username,
-    session_id: record.session_id,
-    created_at: record.created_at,
-    expires_at: record.expires_at,
-    revoked: record.revoked === 1,
-    executed: record.executed === 1,
-    last_execution: record.last_execution,
+
+    username:
+      record.username,
+
+    session_id:
+      record.session_id,
+
+    created_at:
+      record.created_at,
+
+    expires_at:
+      record.expires_at,
+
+    revoked:
+      record.revoked === 1,
+
+    executed:
+      record.executed === 1,
+
+    last_execution:
+      record.last_execution,
+
     status:
       record.revoked === 1
         ? "REVOKED"
@@ -1042,156 +1348,28 @@ async function handleAdminKey(request, env, key) {
   });
 }
 
-/* ROUTER */
+/* =========================================================
+   ROUTER
+   ========================================================= */
 
 export default {
+
   async fetch(request, env) {
+
     try {
-      const url = new URL(request.url);
 
-      /*
-       * STEP 1
-       *
-       * /get-key/token/{TOKEN}
-       */
-      if (
-        request.method === "GET" &&
-        url.pathname.startsWith("/get-key/token/")
-      ) {
-        const token =
-          decodeURIComponent(
-            url.pathname.slice(
-              "/get-key/token/".length
-            )
-          );
+      const url =
+        new URL(request.url);
 
-        return await handleGetKeyToken(
-          request,
-          env,
-          token
-        );
-      }
+      /* -----------------------------------------
+         HOME
+      ----------------------------------------- */
 
-      /*
-       * STEP 2 landing page
-       */
-      if (
-        request.method === "GET" &&
-        url.pathname === "/step2"
-      ) {
-        return await handleStep2(
-          request,
-          env
-        );
-      }
-
-      /*
-       * FINISH
-       *
-       * Work.ink should redirect here:
-       *
-       * /finish?token={TOKEN}
-       */
-      if (
-        request.method === "GET" &&
-        url.pathname === "/finish"
-      ) {
-        const token =
-          url.searchParams.get("token");
-
-        return await handleFinish(
-          request,
-          env,
-          token
-        );
-      }
-
-      /*
-       * GENERATE KEY
-       */
-      if (
-        request.method === "POST" &&
-        url.pathname === "/generate-key"
-      ) {
-        return await handleGenerateKey(
-          request,
-          env
-        );
-      }
-
-      /*
-       * LUA VALIDATION
-       */
-      if (
-        request.method === "POST" &&
-        url.pathname === "/validate"
-      ) {
-        return await handleValidate(
-          request,
-          env
-        );
-      }
-
-      /*
-       * ADMIN LIST
-       */
-      const adminMatch =
-        url.pathname.match(
-          /^\/keys\/([^/]+)\/encrypted\/get-keys-all$/
-        );
-
-      if (
-        request.method === "GET" &&
-        adminMatch
-      ) {
-        return await handleAdminKeys(
-          request,
-          env,
-          adminMatch[1]
-        );
-      }
-
-      /*
-       * ADMIN REVOKE
-       */
-      if (
-        request.method === "POST" &&
-        url.pathname === "/admin/revoke"
-      ) {
-        return await handleAdminRevoke(
-          request,
-          env
-        );
-      }
-
-      /*
-       * ADMIN KEY
-       */
-      const adminKeyMatch =
-        url.pathname.match(
-          /^\/admin\/key\/(.+)$/
-        );
-
-      if (
-        request.method === "GET" &&
-        adminKeyMatch
-      ) {
-        return await handleAdminKey(
-          request,
-          env,
-          decodeURIComponent(
-            adminKeyMatch[1]
-          )
-        );
-      }
-
-      /*
-       * HOME
-       */
       if (
         request.method === "GET" &&
         url.pathname === "/"
       ) {
+
         return html(
           pageShell(
             env.SITE_NAME,
@@ -1208,6 +1386,160 @@ export default {
         );
       }
 
+      /* -----------------------------------------
+         STEP 1
+      ----------------------------------------- */
+
+      if (
+        request.method === "GET" &&
+        url.pathname.startsWith(
+          "/get-key/token/"
+        )
+      ) {
+
+        const token =
+          decodeURIComponent(
+            url.pathname.slice(
+              "/get-key/token/".length
+            )
+          );
+
+        return await handleGetKeyToken(
+          request,
+          env,
+          token
+        );
+      }
+
+      /* -----------------------------------------
+         STEP 2
+      ----------------------------------------- */
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/step2"
+      ) {
+
+        return await handleStep2(
+          request,
+          env
+        );
+      }
+
+      /* -----------------------------------------
+         FINISH
+      ----------------------------------------- */
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/finish"
+      ) {
+
+        const token =
+          url.searchParams.get(
+            "token"
+          );
+
+        return await handleFinish(
+          request,
+          env,
+          token
+        );
+      }
+
+      /* -----------------------------------------
+         GENERATE KEY
+      ----------------------------------------- */
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/generate-key"
+      ) {
+
+        return await handleGenerateKey(
+          request,
+          env
+        );
+      }
+
+      /* -----------------------------------------
+         LUA VALIDATE
+      ----------------------------------------- */
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/validate"
+      ) {
+
+        return await handleValidate(
+          request,
+          env
+        );
+      }
+
+      /* -----------------------------------------
+         ADMIN LIST
+      ----------------------------------------- */
+
+      const adminMatch =
+        url.pathname.match(
+          /^\/keys\/([^/]+)\/encrypted\/get-keys-all$/
+        );
+
+      if (
+        request.method === "GET" &&
+        adminMatch
+      ) {
+
+        return await handleAdminKeys(
+          request,
+          env,
+          adminMatch[1]
+        );
+      }
+
+      /* -----------------------------------------
+         ADMIN REVOKE
+      ----------------------------------------- */
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/admin/revoke"
+      ) {
+
+        return await handleAdminRevoke(
+          request,
+          env
+        );
+      }
+
+      /* -----------------------------------------
+         ADMIN KEY
+      ----------------------------------------- */
+
+      const adminKeyMatch =
+        url.pathname.match(
+          /^\/admin\/key\/(.+)$/
+        );
+
+      if (
+        request.method === "GET" &&
+        adminKeyMatch
+      ) {
+
+        return await handleAdminKey(
+          request,
+          env,
+          decodeURIComponent(
+            adminKeyMatch[1]
+          )
+        );
+      }
+
+      /* -----------------------------------------
+         NOT FOUND
+      ----------------------------------------- */
+
       return json(
         {
           error: "Not found"
@@ -1216,11 +1548,16 @@ export default {
       );
 
     } catch (error) {
-      console.error(error);
+
+      console.error(
+        "Worker error:",
+        error
+      );
 
       return json(
         {
-          error: "Internal server error"
+          error:
+            "Internal server error"
         },
         500
       );
