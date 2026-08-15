@@ -1,3 +1,9 @@
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+
 const SESSION_TTL = 30 * 60;
 const KEY_TTL = 24 * 60 * 60;
 
