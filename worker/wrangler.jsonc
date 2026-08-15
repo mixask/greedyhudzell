@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "greedyhudzell-key-system",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-15",
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "greedyhudzell-keys",
+      "database_id": "PUT_YOUR_DATABASE_ID_HERE"
+    }
+  ],
+
+  "vars": {
+    "SITE_NAME": "GREEDY HUDZELL"
+  }
+}
