@@ -660,7 +660,7 @@ async function handleFinish(request, env, token) {
       <input
         id="username"
         maxlength="20"
-        placeholder="Mihail"
+        placeholder="Not displayname!"
         autocomplete="off"
       >
 
