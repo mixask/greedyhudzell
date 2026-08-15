@@ -17,6 +17,7 @@ function json(data, status = 200, extraHeaders = {}) {
     status,
     headers: {
       ...jsonHeaders,
+      ...corsHeaders,
       ...extraHeaders
     }
   });
