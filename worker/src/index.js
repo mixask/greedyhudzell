@@ -774,7 +774,7 @@ async function getStatus(env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const path = url.pathname.replace(/\\/+$/, "") || "/";
+    const path = url.pathname.replace(/\/+$/, "") || "/";
 
     const cors = {
       "Access-Control-Allow-Origin": "*",
