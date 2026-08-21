@@ -1,793 +1,892 @@
 /**
- * greedyhudzell.xyz — public site Worker (black / white, subtle gold)
- * Repo: mixask/greedyhudzell  →  deploy this as src/index.js (or merge routes)
+ * greedyhudzell.xyz — unified Worker
+ * - Key system (Work.ink + D1) — unchanged logic
+ * - Lua proxies: /loader.lua /script.lua /library.lua /modules.lua
+ * - Obfuscator: GET /obfuscate , POST /api/obfuscate , POST /api/syntax-check
  *
- * GH repo (mixask/GH) stays Lua only — do not put this file there.
- *
- * Routes: / /status /executors /guide /tos /obfuscator
- * API: /api/status /api/executors /api/syntax-check /api/obfuscate /api/admin/status
+ * Bindings: DB (D1)
+ * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional)
+ * Vars: SITE_NAME
  */
 
-const OFFICIAL_DISCORD = "https://discord.gg/sbVuaT9a2T";
-
-const DEFAULT_STATUS = {
-  ban_wave: {
-    active: true,
-    message:
-      "Roblox ban wave is active. Use scripts at your own risk. Prefer high sUNC executors.",
-    updated_at: new Date().toISOString(),
-  },
-  announcement: null,
-  services: { api: "ok" },
-  updated_at: new Date().toISOString(),
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-function css() {
-  return `
-:root {
-  --bg: #080808;
-  --bg2: #0e0e0e;
-  --card: #121212;
-  --border: #242424;
-  --border2: #333;
-  --text: #ececec;
-  --muted: #8a8a8a;
-  --accent: #c4a035;
-  --accent-dim: rgba(196,160,53,.12);
-  --danger: #d96060;
-  --ok: #5aad7a;
-  --warn: #c9a227;
-  --radius: 14px;
-}
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: Inter, system-ui, sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  min-height: 100vh;
-  line-height: 1.5;
-  background-image: radial-gradient(ellipse 70% 40% at 50% -10%, rgba(255,255,255,.04), transparent);
-}
-a { color: #d0d0d0; text-decoration: none; }
-a:hover { color: #fff; }
-.wrap { width: min(960px, 94vw); margin: 0 auto; padding: 24px 0 72px; }
+const SESSION_TTL = 30 * 60;
+const KEY_TTL = 24 * 60 * 60;
 
-/* top tabs */
-.top {
-  position: sticky; top: 0; z-index: 40;
-  background: rgba(8,8,8,.9);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border);
-}
-.top-inner {
-  width: min(960px, 94vw); margin: 0 auto;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 12px 0; flex-wrap: wrap;
-}
-.brand {
-  display: flex; align-items: center; gap: 10px;
-  font-weight: 700; color: var(--text); text-decoration: none; font-size: 15px;
-}
-.brand:hover { color: #fff; }
-.brand-mark {
-  width: 32px; height: 32px; border-radius: 9px;
-  background: #161616; border: 1px solid var(--border2);
-  display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #bbb;
-}
-.nav { display: flex; flex-wrap: wrap; gap: 4px; }
-.nav a {
-  color: var(--muted); padding: 7px 12px; border-radius: 999px;
-  font-size: 12px; font-weight: 500; border: 1px solid transparent;
-}
-.nav a:hover { color: var(--text); background: var(--card); border-color: var(--border); }
-.nav a.active {
-  color: #fff; background: #1a1a1a; border-color: var(--border2);
-  box-shadow: inset 0 0 0 1px rgba(196,160,53,.35);
-}
+const GH = "https://raw.githubusercontent.com/mixask/GH/main";
+const LUAOBF_NEW = "https://api.luaobfuscator.com/v1/obfuscator/newscript";
+const LUAOBF_RUN = "https://api.luaobfuscator.com/v1/obfuscator/obfuscate";
+const LUAOBF_FALLBACK = "11ad3847-d943-4a76-ee19-f9acab3e85144ea9";
 
-.banner {
-  margin-top: 18px; padding: 14px 16px; border-radius: var(--radius);
-  border: 1px solid var(--border2); background: var(--card);
-  display: flex; gap: 12px; align-items: flex-start;
-}
-.banner .dot {
-  width: 8px; height: 8px; margin-top: 6px; border-radius: 50%;
-  background: var(--warn); flex-shrink: 0;
-}
-.banner strong {
-  display: block; font-size: 11px; text-transform: uppercase;
-  letter-spacing: .06em; color: #b0b0b0; margin-bottom: 4px;
-}
-.banner p { font-size: 13px; color: var(--text); }
+const jsonHeaders = {
+  "Content-Type": "application/json; charset=utf-8",
+  "Cache-Control": "no-store",
+};
 
-.hero { text-align: center; padding: 40px 8px 20px; }
-.hero h1 { font-size: clamp(1.7rem, 3.5vw, 2.3rem); font-weight: 700; margin-bottom: 8px; }
-.hero h1 em { font-style: normal; color: #c8c8c8; }
-.hero p { color: var(--muted); max-width: 480px; margin: 0 auto 18px; font-size: 14px; }
-.btns { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
-.btn {
-  display: inline-flex; align-items: center; justify-content: center;
-  padding: 9px 16px; border-radius: 999px; font-size: 12px; font-weight: 600;
-  border: 1px solid var(--border2); background: var(--card); color: var(--text);
-  cursor: pointer;
-}
-.btn:hover { border-color: #444; background: #181818; color: #fff; }
-.btn-primary { background: #1c1c1c; border-color: #3a3a3a; }
-.btn-primary:hover { border-color: rgba(196,160,53,.5); }
-
-.grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px; margin-top: 8px;
-}
-.card, .panel {
-  background: var(--card); border: 1px solid var(--border);
-  border-radius: var(--radius); padding: 16px 18px;
-}
-.panel { margin-top: 16px; }
-.panel h2 { font-size: 1.05rem; margin-bottom: 4px; }
-.panel .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
-.card h3 {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
-  color: #9a9a9a; margin-bottom: 8px;
-}
-.card p, .card li { color: var(--muted); font-size: 13px; }
-
-.pill {
-  display: inline-flex; padding: 3px 9px; border-radius: 999px;
-  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
-  border: 1px solid var(--border);
-}
-.pill-ok { color: var(--ok); background: rgba(90,173,122,.1); border-color: rgba(90,173,122,.3); }
-.pill-warn { color: var(--warn); background: rgba(201,162,39,.1); border-color: rgba(201,162,39,.3); }
-.pill-bad { color: var(--danger); background: rgba(217,96,96,.1); border-color: rgba(217,96,96,.3); }
-.pill-muted { color: var(--muted); background: #161616; }
-
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th, td { text-align: left; padding: 9px 6px; border-bottom: 1px solid var(--border); }
-th {
-  color: var(--muted); font-size: 10px; text-transform: uppercase;
-  letter-spacing: .05em; font-weight: 600;
-}
-.sec-title {
-  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-  color: #888; margin: 14px 0 8px;
-}
-
-.code {
-  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px;
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; color: #c8c8c8; word-break: break-all; white-space: pre-wrap;
-}
-textarea.code-input {
-  width: 100%; min-height: 200px;
-  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 12px;
-  background: #0a0a0a; color: var(--text); border: 1px solid var(--border);
-  border-radius: 10px; padding: 12px; resize: vertical;
-}
-textarea.code-input:focus { outline: none; border-color: #444; }
-select.field {
-  background: var(--bg2); color: var(--text); border: 1px solid var(--border);
-  border-radius: 999px; padding: 8px 12px; font-size: 12px;
-}
-.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
-
-.box {
-  border-radius: 10px; padding: 10px 12px; font-size: 13px; margin: 10px 0;
-  border: 1px solid var(--border);
-}
-.box-ok { background: rgba(90,173,122,.08); border-color: rgba(90,173,122,.3); color: #b8dcc8; }
-.box-warn { background: rgba(217,96,96,.08); border-color: rgba(217,96,96,.3); color: #e8b0b0; }
-.box-note { background: #141414; color: #a8a8a8; }
-
-.rainware {
-  margin-top: 28px; padding: 18px; border-radius: var(--radius);
-  border: 1px solid var(--border); background: #0f0f0f;
-}
-.rainware h3 { font-size: 14px; margin-bottom: 10px; color: #ccc; }
-.rainware-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;
-}
-.rw {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 10px;
-}
-.rw label {
-  display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  color: #666; margin-bottom: 4px;
-}
-.rw a, .rw code { font-size: 12px; color: #bbb; word-break: break-all; }
-.rainware-foot { margin-top: 12px; font-size: 11px; color: #555; text-align: center; }
-
-.tos p, .tos li { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-.tos h3 { font-size: 14px; margin: 16px 0 6px; color: var(--text); }
-.tos ol { margin-left: 18px; }
-
-footer.site {
-  margin-top: 28px; text-align: center; font-size: 11px; color: #555;
-}
-footer.site a { color: #777; }
-
-@media (max-width: 640px) {
-  th:nth-child(5), td:nth-child(5) { display: none; }
-}
-`;
-}
-
-function layout(title, active, body, { rainware = false } = {}) {
-  const tabs = [
-    ["/", "Home"],
-    ["/status", "Status"],
-    ["/executors", "Executors"],
-    ["/guide", "Guide"],
-    ["/tos", "ToS"],
-    ["/obfuscator", "Obfuscator"],
-  ]
-    .map(
-      ([href, label]) =>
-        `<a href="${href}" class="${active === href ? "active" : ""}">${label}</a>`
-    )
-    .join("");
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>${title} · Greedy Hudzell</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
-  <style>${css()}</style>
-</head>
-<body>
-  <header class="top">
-    <div class="top-inner">
-      <a class="brand" href="/">
-        <div class="brand-mark">GH</div>
-        <span>Greedy Hudzell</span>
-      </a>
-      <nav class="nav">${tabs}</nav>
-    </div>
-  </header>
-  <main class="wrap">
-    ${body}
-    ${rainware ? rainwareBlock() : ""}
-    <footer class="site">
-      © Greedy Hudzell · <a href="${OFFICIAL_DISCORD}">discord.gg/sbVuaT9a2T</a> · Not affiliated with Roblox
-    </footer>
-  </main>
-</body>
-</html>`;
-}
-
-function rainwareBlock() {
-  return `
-<section class="rainware">
-  <h3>Rainware · separate project <span class="pill pill-warn">Paid</span></h3>
-  <div class="rainware-grid">
-    <div class="rw"><label>Discord</label><a href="https://discord.gg/rainware" target="_blank" rel="noopener">discord.gg/rainware</a></div>
-    <div class="rw"><label>Game</label><a href="https://www.roblox.com/games/10595058975/Arcane-Lineage" target="_blank" rel="noopener">Arcane Lineage</a></div>
-    <div class="rw" style="grid-column:1/-1"><label>Loader</label>
-      <div class="code">loadstring(game:HttpGet("https://raw.githubusercontent.com/ShitScripts/rainware-loader/refs/heads/main/loader-ob.lua"))()</div>
-    </div>
-  </div>
-  <p class="rainware-foot">Rainware is separate. GH remains its own product. Official GH Discord: discord.gg/sbVuaT9a2T</p>
-</section>`;
-}
-
-function esc(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
-
-function banBanner(status) {
-  let html = "";
-  const bw = status?.ban_wave;
-  if (bw?.active) {
-    html += `<div class="banner"><div class="dot"></div><div>
-      <strong>Ban wave</strong><p>${esc(bw.message || "Elevated risk.")}</p>
-    </div></div>`;
-  }
-  if (status?.announcement?.message) {
-    html += `<div class="banner" style="margin-top:10px"><div class="dot"></div><div>
-      <strong>Announcement</strong><p>${esc(status.announcement.message)}</p>
-    </div></div>`;
-  }
-  return html;
-}
-
-function isExternal(ex) {
-  return String(ex.extype || ex.type || "").toLowerCase().includes("external");
-}
-
-function supportFromExploit(ex) {
-  if (isExternal(ex)) {
-    return {
-      level: "External",
-      cls: "pill-muted",
-      label: "External",
-      suncLabel: "External",
-      outOf11: null,
-      ghOk: false,
-    };
-  }
-  const sunc = Number(ex.suncPercentage);
-  const has = Number.isFinite(sunc);
-  const score = has ? sunc : 0;
-  let out = has ? Math.round((score / 100) * 11) : 0;
-  if (ex.detected === true) out = Math.min(out, Math.max(0, out - 3));
-  if (ex.updateStatus === false) out = Math.min(out, Math.max(0, out - 2));
-  out = Math.max(0, Math.min(11, out));
-
-  let level = "Poor";
-  let cls = "pill-bad";
-  let ghOk = false;
-  if (has && score >= 95 && !ex.detected) {
-    level = "Full";
-    cls = "pill-ok";
-    ghOk = true;
-  } else if (has && score >= 80 && !ex.detected) {
-    level = "Good";
-    cls = "pill-ok";
-    ghOk = true;
-  } else if (has && score >= 50) {
-    level = "Partial";
-    cls = "pill-warn";
-    ghOk = score >= 70 && !ex.detected;
-  }
-  return {
-    level,
-    cls,
-    label: `${level} · ${out}/11`,
-    suncLabel: has ? `${Math.round(score)}%` : "N/A",
-    outOf11: out,
-    ghOk,
-  };
-}
-
-function pageHome(status) {
-  return layout(
-    "Home",
-    "/",
-    `
-    ${banBanner(status)}
-    <section class="hero">
-      <h1>Greedy <em>Hudzell</em></h1>
-      <p>Official status, executor support, and load path. Only trust this domain.</p>
-      <div class="btns">
-        <a class="btn btn-primary" href="${OFFICIAL_DISCORD}" target="_blank" rel="noopener">Discord</a>
-        <a class="btn" href="/status">Status</a>
-        <a class="btn" href="/executors">Executors</a>
-        <a class="btn" href="/obfuscator">Obfuscator</a>
-      </div>
-    </section>
-    <div class="grid">
-      <div class="card">
-        <h3>Load</h3>
-        <div class="code">loadstring(game:HttpGet("https://greedyhudzell.xyz/loader.lua"))()</div>
-      </div>
-      <div class="card">
-        <h3>Keys</h3>
-        <p>Username-bound. Remaining time is shown in the hub after unlock.</p>
-      </div>
-      <div class="card">
-        <h3>Support</h3>
-        <p>Use executors with high sUNC% (Support Full/Good) before running GH.</p>
-      </div>
-    </div>`,
-    { rainware: true }
-  );
-}
-
-function pageStatus(status) {
-  const bw = status.ban_wave || {};
-  return layout(
-    "Status",
-    "/status",
-    `
-    ${banBanner(status)}
-    <section class="panel">
-      <h2>Status</h2>
-      <p class="sub">Public snapshot for users and Discord bot.</p>
-      <div class="grid">
-        <div class="card">
-          <h3>Ban wave</h3>
-          <p><span class="pill ${bw.active ? "pill-warn" : "pill-ok"}">${bw.active ? "Active" : "Clear"}</span></p>
-          <p style="margin-top:8px">${esc(bw.message || "—")}</p>
-        </div>
-        <div class="card">
-          <h3>Updated</h3>
-          <p style="font-family:monospace;font-size:12px;color:var(--muted)">${esc(status.updated_at || "—")}</p>
-        </div>
-        <div class="card">
-          <h3>API</h3>
-          <p><a href="/api/status">/api/status</a><br/><a href="/api/executors">/api/executors</a></p>
-        </div>
-      </div>
-    </section>`
-  );
-}
-
-function pageExecutors() {
-  return layout(
-    "Executors",
-    "/executors",
-    `
-    <section class="panel">
-      <h2>Executor support</h2>
-      <p class="sub">Support ranks by sUNC% (higher = better → X/11). Externals show “External”.</p>
-      <div id="exec-root"><p style="color:var(--muted);font-size:13px">Loading…</p></div>
-      <p style="margin-top:12px;font-size:11px;color:#555">Source: weao.xyz</p>
-    </section>
-    <script>
-    function isExternal(ex) {
-      return String(ex.extype || ex.type || '').toLowerCase().indexOf('external') !== -1;
-    }
-    function supportFrom(ex) {
-      if (isExternal(ex)) return { cls: 'pill-muted', label: 'External', suncLabel: 'External' };
-      var sunc = Number(ex.suncPercentage), has = isFinite(sunc), score = has ? sunc : 0;
-      var out = has ? Math.round((score / 100) * 11) : 0;
-      if (ex.detected === true) out = Math.min(out, Math.max(0, out - 3));
-      if (ex.updateStatus === false) out = Math.min(out, Math.max(0, out - 2));
-      out = Math.max(0, Math.min(11, out));
-      var level = 'Poor', cls = 'pill-bad';
-      if (has && score >= 95 && !ex.detected) { level = 'Full'; cls = 'pill-ok'; }
-      else if (has && score >= 80 && !ex.detected) { level = 'Good'; cls = 'pill-ok'; }
-      else if (has && score >= 50) { level = 'Partial'; cls = 'pill-warn'; }
-      return { cls: cls, label: level + ' · ' + out + '/11', suncLabel: has ? Math.round(score) + '%' : 'N/A' };
-    }
-    function pill(c, t) { return '<span class="pill ' + c + '">' + t + '</span>'; }
-    function rows(list) {
-      return list.map(function(ex) {
-        var sup = supportFrom(ex);
-        return '<tr><td><strong>' + (ex.title || '?') + '</strong><div style="color:#666;font-size:11px">' +
-          (ex.platform || '') + (isExternal(ex) ? ' · external' : '') + '</div></td><td>' +
-          (ex.detected ? pill('pill-bad','Detected') : pill('pill-ok','Clear')) + '</td><td>' +
-          (ex.updateStatus ? pill('pill-ok','Updated') : pill('pill-warn','Outdated')) + '</td><td>' +
-          pill(sup.cls, sup.label) + '</td><td style="color:#888">' + sup.suncLabel + '</td></tr>';
-      }).join('');
-    }
-    fetch('/api/executors').then(function(r){ return r.json(); }).then(function(data) {
-      if (!Array.isArray(data)) throw new Error(data.error || 'bad data');
-      data.sort(function(a,b) {
-        var ae = isExternal(a) ? 1 : 0, be = isExternal(b) ? 1 : 0;
-        if (ae !== be) return ae - be;
-        return (Number(b.suncPercentage)||0) - (Number(a.suncPercentage)||0);
-      });
-      var inj = data.filter(function(x){ return !isExternal(x); });
-      var ext = data.filter(isExternal);
-      var head = '<table><thead><tr><th>Name</th><th>Detection</th><th>Update</th><th>Support</th><th>sUNC</th></tr></thead><tbody>';
-      document.getElementById('exec-root').innerHTML =
-        '<div class="sec-title">Executors</div><div style="overflow-x:auto">' + head + rows(inj) + '</tbody></table></div>' +
-        '<div class="sec-title">Externals</div><div style="overflow-x:auto">' + head + rows(ext) + '</tbody></table></div>';
-    }).catch(function(e) {
-      document.getElementById('exec-root').innerHTML = '<div class="box box-warn">' + e.message + '</div>';
-    });
-    </script>`
-  );
-}
-
-function pageGuide() {
-  return layout(
-    "Guide",
-    "/guide",
-    `
-    <section class="panel">
-      <h2>Guide</h2>
-      <p class="sub">Risk reduction only — nothing is risk-free.</p>
-      <ul style="margin:0 0 12px 18px;color:var(--muted);font-size:13px">
-        <li>Prefer Support Full/Good (high sUNC%) before GH.</li>
-        <li>Avoid unattended blatant autofarm on main accounts.</li>
-        <li>Avoid rapid rejoin loops during ban waves.</li>
-        <li>Load only from greedyhudzell.xyz.</li>
-      </ul>
-      <div class="box box-warn"><strong>Alts:</strong> do not protect against HWID / IP bans.</div>
-      <p style="color:var(--muted);font-size:13px;margin-top:10px">
-        Some users mention <a href="https://althub.gg" target="_blank" rel="noopener">althub.gg</a>
-        — not affiliated; not a paid promo.
-      </p>
-      <p style="color:var(--muted);font-size:13px;margin-top:12px">
-        Official Discord: <a href="${OFFICIAL_DISCORD}">discord.gg/sbVuaT9a2T</a>
-      </p>
-    </section>`
-  );
-}
-
-function pageTos() {
-  return layout(
-    "ToS",
-    "/tos",
-    `
-    <section class="panel tos">
-      <h2>Terms of Service</h2>
-      <p class="sub">English · August 2026</p>
-      <p>By using Greedy Hudzell websites, loaders, keys, or related software (“Service”), you agree to these Terms.</p>
-      <h3>1. Nature of the Service</h3>
-      <p>Provided “as is.” Automation and third-party executors carry ban risk. You accept full responsibility for your accounts and devices.</p>
-      <h3>2. Restrictions</h3>
-      <ol>
-        <li>Do not reverse engineer, decompile, or deobfuscate the Service except where prohibited restrictions are disallowed by law.</li>
-        <li>Do not claim authorship of Greedy Hudzell or represent yourself as its creator or official maintainer unless you are the rights holder.</li>
-        <li>Do not resell private keys or non-public loaders without permission.</li>
-        <li>Do not advertise third-party services in official GH Discord channels without staff approval.</li>
-        <li>Do not bypass key validation, phish users, or disrupt infrastructure.</li>
-      </ol>
-      <h3>3. Keys</h3>
-      <p>Keys may be username-bound, time-limited, and revoked for abuse.</p>
-      <h3>4. No warranty</h3>
-      <p>No warranties. No liability for bans or damages to the maximum extent permitted by law.</p>
-      <h3>5. Common sense</h3>
-      <p>Act in good faith. Staff may refuse support or revoke access.</p>
-      <h3>6. Contact</h3>
-      <p><a href="${OFFICIAL_DISCORD}">discord.gg/sbVuaT9a2T</a></p>
-    </section>`
-  );
-}
-
-function pageObfuscator() {
-  // Same shell + nav tabs as every other page — enter via tab, leave via any other tab
-  return layout(
-    "Obfuscator",
-    "/obfuscator",
-    `
-    <section class="panel">
-      <h2>Lua obfuscator</h2>
-      <p class="sub">Same site tabs as Home — use the top nav to leave. Syntax check allows <code>--[[ ]]</code>.</p>
-      <textarea id="src" class="code-input" placeholder="-- paste Lua here"></textarea>
-      <div class="row">
-        <select id="mode" class="field">
-          <option value="light">Light</option>
-          <option value="strings">Strings / table</option>
-          <option value="longstr">Long-string wrap</option>
-        </select>
-        <button type="button" class="btn" id="btn-syntax">Check syntax</button>
-        <button type="button" class="btn btn-primary" id="btn-obf">Obfuscate</button>
-        <a class="btn" href="/">← Home</a>
-      </div>
-      <div id="msg"></div>
-      <textarea id="out" class="code-input" style="min-height:160px" placeholder="Output…" readonly></textarea>
-    </section>
-    <script>
-    (function(){
-      var msg = document.getElementById('msg');
-      var src = document.getElementById('src');
-      var out = document.getElementById('out');
-      function show(h){ msg.innerHTML = h; }
-      document.getElementById('btn-syntax').onclick = async function(){
-        show('<p style="color:var(--muted);font-size:12px">Checking…</p>');
-        try {
-          var r = await fetch('/api/syntax-check', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ code: src.value })
-          });
-          var j = await r.json();
-          if (j.ok) show('<div class="box box-ok">Syntax OK' + (j.note ? ' — ' + j.note : '') + '</div>');
-          else show('<div class="box box-warn">' + (j.issues||[]).join('<br>') + '</div>');
-        } catch(e) { show('<div class="box box-warn">' + e.message + '</div>'); }
-      };
-      document.getElementById('btn-obf').onclick = async function(){
-        show('<p style="color:var(--muted);font-size:12px">Working…</p>');
-        out.value = '';
-        try {
-          var r = await fetch('/api/obfuscate', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ code: src.value, mode: document.getElementById('mode').value })
-          });
-          var t = await r.text();
-          var j = {};
-          try { j = JSON.parse(t); } catch(_) {
-            show('<div class="box box-warn">Bad response: ' + t.slice(0,200) + '</div>');
-            return;
-          }
-          if (!r.ok || j.error) {
-            show('<div class="box box-warn">' + (j.error || ('HTTP ' + r.status)) + '</div>');
-            return;
-          }
-          out.value = j.code || j.result || '';
-          show('<div class="box box-ok">Done' + (j.note ? ' — ' + j.note : '') + '</div>');
-        } catch(e) { show('<div class="box box-warn">' + e.message + '</div>'); }
-      };
-    })();
-    </script>`
-  );
-}
-
-function syntaxCheckLua(code) {
-  const issues = [];
-  if (typeof code !== "string" || !code.trim()) {
-    return { ok: false, issues: ["Empty input"] };
-  }
-  let s = code;
-  s = s.replace(/--\[(=*)\[[\s\S]*?\]\1\]/g, " ");
-  s = s.replace(/--[^\n]*/g, " ");
-  s = s.replace(/\[(=*)\[[\s\S]*?\]\1\]/g, '""');
-  s = s.replace(/"(?:\\.|[^"\\])*"/g, '""');
-  s = s.replace(/'(?:\\.|[^'\\])*'/g, "''");
-  for (const [a, b, name] of [
-    ["(", ")", "parentheses"],
-    ["{", "}", "braces"],
-  ]) {
-    let d = 0;
-    for (const ch of s) {
-      if (ch === a) d++;
-      if (ch === b) d--;
-      if (d < 0) {
-        issues.push("Unbalanced " + name);
-        break;
-      }
-    }
-    if (d > 0) issues.push("Unclosed " + name);
-  }
-  return {
-    ok: issues.length === 0,
-    issues,
-    note: "Block comments --[[ ]] are valid and ignored",
-  };
-}
-
-async function fetchWeao() {
-  const res = await fetch("https://weao.xyz/api/status/exploits", {
-    headers: { "User-Agent": "WEAO-3PService", Accept: "application/json" },
-  });
-  if (!res.ok) throw new Error("weao " + res.status);
-  return res.json();
-}
-
-async function getStatus(env) {
-  try {
-    if (env?.SITE_STATUS) {
-      const raw = await env.SITE_STATUS.get("public");
-      if (raw) return JSON.parse(raw);
-    }
-  } catch (_) {}
-  return { ...DEFAULT_STATUS, updated_at: new Date().toISOString() };
-}
-
-async function setStatus(env, next) {
-  if (!env?.SITE_STATUS) throw new Error("SITE_STATUS KV not bound");
-  next.updated_at = new Date().toISOString();
-  await env.SITE_STATUS.put("public", JSON.stringify(next));
-  return next;
-}
-
-function json(data, status = 200, extra = {}) {
+function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
+    headers: { ...jsonHeaders, ...corsHeaders, ...extraHeaders },
+  });
+}
+
+function html(body, status = 200, extraHeaders = {}) {
+  return new Response(body, {
+    status,
     headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      ...extra,
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...extraHeaders,
     },
   });
 }
 
+function plain(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-cache",
+      ...corsHeaders,
+    },
+  });
+}
+
+function now() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function getClientIP(request) {
+  return (
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
+    ""
+  );
+}
+
+async function sha256(value) {
+  const data = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randomString(length = 32) {
+  const bytes = new Uint8Array(length);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function generateKey() {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let value = "";
+  for (const byte of bytes) value += alphabet[byte % alphabet.length];
+  return `GH-${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;
+}
+
+function cookie(name, value, maxAge) {
+  return `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
+function getCookie(request, name) {
+  const cookies = request.headers.get("Cookie") || "";
+  for (const part of cookies.split(";")) {
+    const [key, ...rest] = part.trim().split("=");
+    if (key === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+/* ===================== WORK.INK ===================== */
+async function validateWorkInkToken(token) {
+  if (!token || token.length > 500) return { valid: false, reason: "missing_token" };
+  try {
+    const safeToken = encodeURIComponent(token);
+    const response = await fetch(`https://work.ink/_api/v2/token/isValid/${safeToken}`);
+    if (!response.ok) return { valid: false, reason: "workink_http_error" };
+    const data = await response.json();
+    return {
+      valid: data.valid === true,
+      byIp: data.info?.byIp ?? data.byIp ?? null,
+      info: data.info ?? null,
+    };
+  } catch (error) {
+    console.error("Work.ink validation error:", error);
+    return { valid: false, reason: "workink_request_failed" };
+  }
+}
+
+/* ===================== DB / SESSION ===================== */
+async function createSession(env, ipHash) {
+  const timestamp = now();
+  const sessionId = `GH-${randomString(32)}`;
+  await env.DB.prepare(
+    `INSERT INTO sessions (session_id, ip_hash, step1, step2, created_at, expires_at)
+     VALUES (?, ?, 1, 0, ?, ?)`
+  )
+    .bind(sessionId, ipHash, timestamp, timestamp + SESSION_TTL)
+    .run();
+  return sessionId;
+}
+
+async function getSession(env, sessionId) {
+  if (!sessionId) return null;
+  return (
+    (await env.DB.prepare(`SELECT * FROM sessions WHERE session_id = ? LIMIT 1`).bind(sessionId).first()) ||
+    null
+  );
+}
+
+async function validSession(env, sessionId, ipHash) {
+  const session = await getSession(env, sessionId);
+  if (!session) return { valid: false, reason: "session_not_found" };
+  if (session.expires_at <= now()) return { valid: false, reason: "session_expired" };
+  if (session.ip_hash !== ipHash) return { valid: false, reason: "ip_mismatch" };
+  return { valid: true, session };
+}
+
+/* ===================== HTML SHELL (shared theme) ===================== */
+function pageShell(title, content) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080808;color:#fff;font-family:Arial,sans-serif}
+.card{width:min(460px,calc(100% - 32px));background:#111;border:1px solid #292929;border-radius:18px;padding:30px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.card.wide{width:min(980px,calc(100% - 24px))}
+.logo{font-size:25px;font-weight:800;letter-spacing:1px;margin-bottom:24px}
+.step{padding:12px 14px;border-radius:10px;background:#181818;margin:8px 0}
+.ok{color:#6dff9a}
+button{width:100%;padding:13px;margin-top:12px;border:0;border-radius:10px;background:#fff;color:#000;font-weight:700;cursor:pointer}
+button.secondary{background:#181818;color:#fff;border:1px solid #333}
+button:disabled{opacity:.55;cursor:wait}
+input,select,textarea{width:100%;padding:13px;border-radius:10px;border:1px solid #333;background:#080808;color:#fff;outline:none}
+textarea{min-height:200px;font-family:ui-monospace,monospace;resize:vertical}
+label{display:block;margin:16px 0 7px;font-size:14px;color:#aaa}
+.muted{color:#888;font-size:13px;line-height:1.5}
+.error{color:#ff6d6d}
+.nav{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}
+.nav a{color:#aaa;text-decoration:none;font-size:13px}
+.nav a:hover{color:#fff}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;margin:4px 0;color:#ccc}
+.plugins{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px}
+@media(max-width:600px){.plugins{grid-template-columns:1fr}}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.actions button{flex:1;min-width:120px}
+</style>
+</head>
+<body>
+<div class="card${title.includes("Obfuscator") ? " wide" : ""}">
+${content}
+</div>
+</body>
+</html>`;
+}
+
+/* ===================== KEY FLOW ===================== */
+async function handleGetKeyToken(request, env, token) {
+  const work = await validateWorkInkToken(token);
+  if (!work.valid) {
+    return html(
+      pageShell("Failed", `<div class="logo">${env.SITE_NAME}</div><h2>FAILED</h2><p>Invalid or expired Work.ink token.</p>`),
+      403
+    );
+  }
+  const currentIP = getClientIP(request);
+  if (!currentIP) {
+    return html(
+      pageShell("Failed", `<div class="logo">${env.SITE_NAME}</div><h2>FAILED</h2><p>Unable to identify your IP address.</p>`),
+      403
+    );
+  }
+  const ipHash = await sha256(currentIP);
+  const sessionId = await createSession(env, ipHash);
+  return html(
+    pageShell(
+      "Step 1 Complete",
+      `<div class="logo">${env.SITE_NAME}</div>
+      <div class="step ok">✓ STEP 1 COMPLETE</div>
+      <p class="muted">Work.ink token verified successfully.</p>
+      <p class="muted">Continue to the second required step.</p>
+      <a href="/step2"><button>CONTINUE TO STEP 2</button></a>`
+    ),
+    200,
+    { "Set-Cookie": cookie("GH_SESSION", sessionId, SESSION_TTL) }
+  );
+}
+
+async function handleStep2(request, env) {
+  const sessionId = getCookie(request, "GH_SESSION");
+  const currentIP = getClientIP(request);
+  const ipHash = await sha256(currentIP);
+  const result = await validSession(env, sessionId, ipHash);
+  if (!result.valid || result.session.step1 !== 1) {
+    return html(
+      pageShell("Failed", `<div class="logo">${env.SITE_NAME}</div><h2>FAILED</h2><p>Please complete Step 1 first.</p>`),
+      403
+    );
+  }
+  const secondWorkInkLink = "https://work.ink/28wp/greedy-hudzell-12";
+  return html(
+    pageShell(
+      "Step 2",
+      `<div class="logo">${env.SITE_NAME}</div>
+      <div class="step ok">✓ STEP 1 COMPLETE</div>
+      <p class="muted">Complete Work.ink Step 2.</p>
+      <a href="${secondWorkInkLink}"><button>CONTINUE TO STEP 2</button></a>`
+    )
+  );
+}
+
+async function handleFinish(request, env, token) {
+  const sessionId = getCookie(request, "GH_SESSION");
+  const currentIP = getClientIP(request);
+  const ipHash = await sha256(currentIP);
+  const sessionResult = await validSession(env, sessionId, ipHash);
+  if (!sessionResult.valid) {
+    return html(
+      pageShell("Failed", `<div class="logo">${env.SITE_NAME}</div><h2>FAILED</h2><p>Your session is invalid or expired.</p>`),
+      403
+    );
+  }
+  const work = await validateWorkInkToken(token);
+  if (!work.valid) {
+    return html(
+      pageShell("Failed", `<div class="logo">${env.SITE_NAME}</div><h2>FAILED</h2><p>Invalid Work.ink Step 2 token.</p>`),
+      403
+    );
+  }
+  await env.DB.prepare(`UPDATE sessions SET step2 = 1 WHERE session_id = ?`).bind(sessionId).run();
+  return html(
+    pageShell(
+      "Key Generator",
+      `<div class="logo">${env.SITE_NAME}</div>
+      <div class="step ok">✓ STEP 1 COMPLETE</div>
+      <div class="step ok">✓ STEP 2 COMPLETE</div>
+      <label>Roblox username</label>
+      <input id="username" maxlength="20" placeholder="Not displayname!" autocomplete="off">
+      <button onclick="generateKey()">GENERATE KEY</button>
+      <p id="result" class="muted"></p>
+      <script>
+      async function generateKey() {
+        const username = document.getElementById("username").value.trim();
+        const result = document.getElementById("result");
+        if (!username) { result.textContent = "Enter your Roblox username."; return; }
+        result.textContent = "Generating...";
+        try {
+          const response = await fetch("/generate-key", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username })
+          });
+          const data = await response.json();
+          if (!data.success) { result.textContent = data.reason || "Failed to generate key."; return; }
+          result.innerHTML = "Your key:<br><br><strong>" + data.key + "</strong>";
+        } catch { result.textContent = "Network error."; }
+      }
+      </script>`
+    )
+  );
+}
+
+async function handleGenerateKey(request, env) {
+  const sessionId = getCookie(request, "GH_SESSION");
+  const currentIP = getClientIP(request);
+  if (!currentIP) return json({ success: false, reason: "ip_unavailable" }, 403);
+  const ipHash = await sha256(currentIP);
+  const sessionResult = await validSession(env, sessionId, ipHash);
+  if (!sessionResult.valid) return json({ success: false, reason: sessionResult.reason }, 403);
+  if (sessionResult.session.step1 !== 1 || sessionResult.session.step2 !== 1) {
+    return json({ success: false, reason: "steps_not_completed" }, 403);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
+    return json({ success: false, reason: "invalid_username" }, 400);
+  }
+  const existing = await env.DB.prepare(`SELECT key FROM keys WHERE session_id = ? LIMIT 1`).bind(sessionId).first();
+  if (existing) return json({ success: true, key: existing.key, already_generated: true });
+  const key = generateKey();
+  const timestamp = now();
+  await env.DB.prepare(
+    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution)
+     VALUES (?, ?, ?, ?, ?, 0, 0, NULL)`
+  )
+    .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL)
+    .run();
+  return json({ success: true, key, expires_at: timestamp + KEY_TTL });
+}
+
+async function handleValidate(request, env) {
+  if (request.method !== "POST") return json({ valid: false, reason: "method_not_allowed" }, 405);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ valid: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!key || !username) return json({ valid: false, reason: "missing_key_or_username" });
+
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ valid: false, reason: "invalid_key" });
+  if (record.revoked === 1) return json({ valid: false, reason: "revoked" });
+  if (record.expires_at <= now()) return json({ valid: false, reason: "expired" });
+  if (record.username !== username) return json({ valid: false, reason: "username_mismatch" });
+
+  const timestamp = now();
+  await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`).bind(timestamp, key).run();
+
+  // Additive for Lua loader: real unix expiry (KEY_TTL from D1)
+  return json({
+    valid: true,
+    expires_at: record.expires_at,
+  });
+}
+
+/* ===================== ADMIN ===================== */
+function adminAuthorized(request, env) {
+  const auth = request.headers.get("Authorization");
+  if (!auth || !auth.startsWith("Bearer ")) return false;
+  return auth.slice(7) === env.ADMIN_SECRET;
+}
+
+async function createRotationToken(env) {
+  const interval = Math.floor(Date.now() / 1000 / 600);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.ROTATION_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(interval)));
+  return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function handleAdminKeys(request, env, rotation) {
+  if (!adminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
+  const expectedRotation = await createRotationToken(env);
+  if (rotation !== expectedRotation) return json({ error: "Invalid rotation" }, 403);
+  const url = new URL(request.url);
+  const search = url.searchParams.get("search")?.trim() || "";
+  let result;
+  if (search) {
+    result = await env.DB.prepare(
+      `SELECT * FROM keys WHERE key LIKE ? OR username LIKE ? ORDER BY created_at DESC`
+    )
+      .bind(`%${search}%`, `%${search}%`)
+      .all();
+  } else {
+    result = await env.DB.prepare(`SELECT * FROM keys ORDER BY created_at DESC`).all();
+  }
+  return json({
+    keys: result.results.map((k) => ({
+      key: k.key,
+      username: k.username,
+      executed: k.executed === 1,
+      last_execution: k.last_execution,
+      created_at: k.created_at,
+      expires_at: k.expires_at,
+      revoked: k.revoked === 1,
+      status: k.revoked === 1 ? "REVOKED" : k.expires_at <= now() ? "EXPIRED" : "ACTIVE",
+    })),
+  });
+}
+
+async function handleAdminRevoke(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  if (!key) return json({ success: false, reason: "missing_key" }, 400);
+  const result = await env.DB.prepare(`UPDATE keys SET revoked = 1 WHERE key = ?`).bind(key).run();
+  if (!result.meta.changes) return json({ success: false, reason: "key_not_found" }, 404);
+  return json({ success: true });
+}
+
+async function handleAdminKey(request, env, key) {
+  if (!adminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ error: "Key not found" }, 404);
+  return json({
+    key: record.key,
+    username: record.username,
+    session_id: record.session_id,
+    created_at: record.created_at,
+    expires_at: record.expires_at,
+    revoked: record.revoked === 1,
+    executed: record.executed === 1,
+    last_execution: record.last_execution,
+    status: record.revoked === 1 ? "REVOKED" : record.expires_at <= now() ? "EXPIRED" : "ACTIVE",
+  });
+}
+
+/* ===================== LUA PROXY ===================== */
+async function proxyGithub(file) {
+  const response = await fetch(`${GH}/${file}`, { cf: { cacheTtl: 0, cacheEverything: false } });
+  if (!response.ok) return plain(`${file} not found`, 404);
+  return plain(await response.text(), 200);
+}
+
+/* ===================== OBFUSCATOR ===================== */
+const PLUGIN_DEFS = [
+  { key: "EncryptStrings", label: "Encrypt Strings", args: [100] },
+  { key: "SwizzleLookups", label: "Table indirection (SwizzleLookups)", args: [100] },
+  { key: "EncryptFuncDeclaration", label: "Encrypt Func Declaration", args: [100] },
+  { key: "ControlFlowFlattenV1AllBlocks", label: "Control Flow Flatten", args: [75, 75, 33] },
+  { key: "RevertAllIfStatements", label: "Revert If Statements", args: [50] },
+  { key: "MixedBooleanArithmetic", label: "Mixed Boolean Arithmetic", args: [75] },
+  { key: "MutateAllLiterals", label: "Mutate Literals", args: [20] },
+  { key: "JunkifyAllIfStatements", label: "Junkify If Statements", args: [50] },
+];
+
+function presetConfig(preset) {
+  if (preset === "light") {
+    return { MinifiyAll: true, CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100] } };
+  }
+  if (preset === "full") {
+    return {
+      MinifiyAll: true,
+      ASCIIArt: "feet_1",
+      Virtualize: true,
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        EncryptFuncDeclaration: [100],
+        RevertAllIfStatements: [50],
+        ControlFlowFlattenV1AllBlocks: [75, 75, 33],
+        MixedBooleanArithmetic: [75],
+        MutateAllLiterals: [20],
+        JunkifyAllIfStatements: [50],
+      },
+    };
+  }
+  return {
+    MinifiyAll: true,
+    CustomPlugins: {
+      SwizzleLookups: [100],
+      EncryptStrings: [100],
+      ControlFlowFlattenV1AllBlocks: [50, 50, 25],
+      JunkifyAllIfStatements: [30],
+    },
+  };
+}
+
+function buildConfigFromOptions(opts) {
+  opts = opts || {};
+  const cfg = {
+    MinifiyAll: opts.MinifiyAll !== false,
+    Virtualize: !!opts.Virtualize,
+  };
+  if (opts.Multifile) cfg.Multifile = true;
+  const plugins = {};
+  for (const p of PLUGIN_DEFS) {
+    if (opts[p.key]) plugins[p.key] = p.args;
+  }
+  if (Object.keys(plugins).length) cfg.CustomPlugins = plugins;
+  return cfg;
+}
+
+function plainLongStringEmbed(code) {
+  if (code.includes("]=====]")) return `-- embed\nreturn loadstring([======[\n${code}\n]======])()`;
+  return `-- embed\nreturn loadstring([=====[\n${code}\n]=====])()`;
+}
+
+function bit32Embed(code) {
+  const key = 0x5a;
+  const bytes = [];
+  for (let i = 0; i < code.length; i++) bytes.push(code.charCodeAt(i) ^ (key + (i % 17)));
+  const parts = [];
+  for (let i = 0; i < bytes.length; i += 40) parts.push(bytes.slice(i, i + 40).join(","));
+  const dataLua = parts.map((p) => "{" + p + "}").join(",\n");
+  const payload = `-- Greedy embed+bit32
+local _k=${key}
+local _chunks={${dataLua}}
+local _out={}
+local _i=0
+for _,ch in ipairs(_chunks) do
+  for _,b in ipairs(ch) do
+    _i=_i+1
+    _out[#_out+1]=string.char(bit32.bxor(b,(_k+((_i-1)%17))))
+  end
+end
+local _src=table.concat(_out)
+local _fn,_err=loadstring(_src)
+if not _fn then error(_err) end
+return _fn()
+`;
+  if (payload.includes("]=====]")) return `return loadstring([======[\n${payload}\n]======])()`;
+  return `return loadstring([=====[\n${payload}\n]=====])()`;
+}
+
+async function callLuaObf(apiKey, code, cfg) {
+  const newRes = await fetch(LUAOBF_NEW, {
+    method: "POST",
+    headers: { "content-type": "text/plain; charset=utf-8", apikey: apiKey },
+    body: code,
+  });
+  if (!newRes.ok) {
+    const t = await newRes.text();
+    return { ok: false, error: `newscript HTTP ${newRes.status}: ${t.slice(0, 240)}` };
+  }
+  let session;
+  try {
+    session = await newRes.json();
+  } catch {
+    return { ok: false, error: "newscript: invalid JSON" };
+  }
+  if (!session.sessionId) return { ok: false, error: session.message || "no sessionId" };
+
+  const runRes = await fetch(LUAOBF_RUN, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      apikey: apiKey,
+      sessionId: session.sessionId,
+    },
+    body: JSON.stringify(cfg),
+  });
+  if (!runRes.ok) {
+    const t = await runRes.text();
+    return { ok: false, error: `obfuscate HTTP ${runRes.status}: ${t.slice(0, 240)}` };
+  }
+  let out;
+  try {
+    out = await runRes.json();
+  } catch {
+    return { ok: false, error: "obfuscate: invalid JSON" };
+  }
+  if (!out.code) return { ok: false, error: out.message || "empty code from API" };
+  return { ok: true, code: out.code, sessionId: session.sessionId };
+}
+
+function syntaxCheck(code) {
+  const issues = [];
+  if (!code || !code.trim()) return { ok: false, issues: ["empty code"] };
+  const pairs = { "(": ")", "[": "]", "{": "}" };
+  const stack = [];
+  let i = 0;
+  let line = 1;
+  let inStr = null;
+  let longEq = 0;
+  while (i < code.length) {
+    const c = code[i];
+    if (c === "\n") line++;
+    if (!inStr && c === "[" && code[i + 1] === "[") {
+      inStr = "long";
+      longEq = 0;
+      i += 2;
+      continue;
+    }
+    if (!inStr && c === "[" && code[i + 1] === "=") {
+      let n = 0;
+      let j = i + 1;
+      while (code[j] === "=") {
+        n++;
+        j++;
+      }
+      if (code[j] === "[") {
+        inStr = "long";
+        longEq = n;
+        i = j + 1;
+        continue;
+      }
+    }
+    if (inStr === "long") {
+      if (c === "]") {
+        let n = 0;
+        let j = i + 1;
+        while (code[j] === "=") {
+          n++;
+          j++;
+        }
+        if (n === longEq && code[j] === "]") {
+          inStr = null;
+          i = j + 1;
+          continue;
+        }
+      }
+      i++;
+      continue;
+    }
+    if (!inStr && (c === '"' || c === "'")) {
+      inStr = c;
+      i++;
+      continue;
+    }
+    if (inStr === '"' || inStr === "'") {
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      if (c === inStr) inStr = null;
+      i++;
+      continue;
+    }
+    if (c === "-" && code[i + 1] === "-") {
+      while (i < code.length && code[i] !== "\n") i++;
+      continue;
+    }
+    if (pairs[c]) stack.push({ ch: c, line });
+    else if (c === ")" || c === "]" || c === "}") {
+      const top = stack.pop();
+      if (!top || pairs[top.ch] !== c) issues.push(`line ${line}: unexpected '${c}'`);
+    }
+    i++;
+  }
+  if (inStr) issues.push("unclosed string/long-string");
+  for (const s of stack) issues.push(`line ${s.line}: unclosed '${s.ch}'`);
+  return { ok: issues.length === 0, issues };
+}
+
+function obfuscatePage(siteName) {
+  const pluginChecks = PLUGIN_DEFS.map(
+    (p) =>
+      `<label class="chk"><input type="checkbox" data-plugin="${p.key}" ${
+        p.key === "EncryptStrings" || p.key === "SwizzleLookups" ? "checked" : ""
+      }/> ${p.label}</label>`
+  ).join("");
+
+  return pageShell(
+    "Obfuscator · " + siteName,
+    `
+<div class="nav">
+  <a href="/">${siteName}</a>
+  <a href="/obfuscator">Obfuscator</a>
+  <a href="https://discord.gg/sbVuaT9a2T">Discord</a>
+</div>
+<div class="logo">${siteName} · Obfuscator</div>
+<p class="muted">Same dark theme as the key site. Powered by luaobfuscator.com API + local embed modes.</p>
+
+<label>Preset</label>
+<select id="preset">
+  <option value="custom">Custom (checkboxes)</option>
+  <option value="light">Light — Swizzle + Strings</option>
+  <option value="medium" selected>Medium</option>
+  <option value="full">Full — Virtualize + plugins</option>
+  <option value="embed">Embed only [=====[ ]=====]</option>
+  <option value="embed_bit32">Embed + bit32 + light API</option>
+</select>
+
+<label>Root</label>
+<label class="chk"><input type="checkbox" data-root="MinifiyAll" checked/> Minify All</label>
+<label class="chk"><input type="checkbox" data-root="Virtualize"/> Virtualize</label>
+<label class="chk"><input type="checkbox" data-root="Multifile"/> Multifile</label>
+
+<label>Plugins</label>
+<div class="plugins">${pluginChecks}</div>
+
+<div class="grid" style="margin-top:16px">
+  <div>
+    <label>Input</label>
+    <textarea id="input" placeholder="paste Lua..."></textarea>
+    <div class="actions">
+      <button id="run">Obfuscate</button>
+      <button class="secondary" id="checkIn">Syntax (in)</button>
+    </div>
+  </div>
+  <div>
+    <label>Output</label>
+    <textarea id="output" placeholder="result..."></textarea>
+    <div class="actions">
+      <button class="secondary" id="copy">Copy</button>
+      <button class="secondary" id="checkOut">Syntax (out)</button>
+    </div>
+  </div>
+</div>
+<p id="status" class="muted"></p>
+
+<script>
+const statusEl=document.getElementById('status');
+const input=document.getElementById('input');
+const output=document.getElementById('output');
+const preset=document.getElementById('preset');
+const runBtn=document.getElementById('run');
+function collectOptions(){
+  const opts={};
+  document.querySelectorAll('[data-root]').forEach(el=>opts[el.getAttribute('data-root')]=el.checked);
+  document.querySelectorAll('[data-plugin]').forEach(el=>opts[el.getAttribute('data-plugin')]=el.checked);
+  return opts;
+}
+async function doCheck(which){
+  const code=which==='in'?input.value:output.value;
+  statusEl.textContent='Checking...';
+  try{
+    const res=await fetch('/api/syntax-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:code||''})});
+    const data=await res.json();
+    statusEl.innerHTML=data.ok?'<span class="ok">Syntax OK (structural)</span>':'<span class="error">'+(data.issues||[]).join('<br>')+'</span>';
+  }catch(e){statusEl.textContent=String(e)}
+}
+document.getElementById('checkIn').onclick=()=>doCheck('in');
+document.getElementById('checkOut').onclick=()=>doCheck('out');
+runBtn.onclick=async()=>{
+  const code=input.value||'';
+  if(!code.trim()){statusEl.textContent='Paste code first';return}
+  runBtn.disabled=true;statusEl.textContent='Obfuscating...';output.value='';
+  try{
+    const res=await fetch('/api/obfuscate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({preset:preset.value,options:collectOptions(),code})});
+    const data=await res.json();
+    if(!data.ok){statusEl.innerHTML='<span class="error">'+(data.error||'failed')+'</span>'}
+    else{output.value=data.code||'';statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>'}
+  }catch(e){statusEl.textContent=String(e)}
+  runBtn.disabled=false;
+};
+document.getElementById('copy').onclick=async()=>{
+  try{await navigator.clipboard.writeText(output.value||'');statusEl.textContent='Copied'}catch(_){statusEl.textContent='Copy failed'}
+};
+</script>
+`
+  );
+}
+
+/* ===================== ROUTER ===================== */
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-    const cors = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    };
-    if (request.method === "OPTIONS") return new Response(null, { headers: cors });
-
     try {
-      // Keep existing key/loader routes if this file is the ONLY worker:
-      // merge your /validate /loader.lua handlers ABOVE this site block in production.
+      if (request.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
 
-      if (path === "/api/status") return json(await getStatus(env));
+      const url = new URL(request.url);
+      let path = url.pathname;
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
 
-      if (path === "/api/executors") {
+      // ========== KEY API (must be before any HTML) ==========
+      if (request.method === "POST" && path === "/validate") {
+        return await handleValidate(request, env);
+      }
+      if (request.method === "GET" && path.startsWith("/get-key/token/")) {
+        const token = decodeURIComponent(path.slice("/get-key/token/".length));
+        return await handleGetKeyToken(request, env, token);
+      }
+      if (request.method === "GET" && path === "/step2") {
+        return await handleStep2(request, env);
+      }
+      if (request.method === "GET" && path === "/finish") {
+        return await handleFinish(request, env, url.searchParams.get("token"));
+      }
+      if (request.method === "POST" && path === "/generate-key") {
+        return await handleGenerateKey(request, env);
+      }
+
+
+
+      // --- Lua proxies (mixask/GH) ---
+      if (path === "/loader.lua") return proxyGithub("greedyloader.lua");
+      if (path === "/script.lua") return proxyGithub("greedy.lua");
+      if (path === "/library.lua") return proxyGithub("greedylibrary.lua");
+      if (path === "/modules.lua") return proxyGithub("greedymodules.lua");
+
+      // --- Obfuscator ---
+      if (
+        request.method === "GET" &&
+        (path === "/obfuscate" ||
+          path === "/obfuscate/" ||
+          path === "/obfuscator" ||
+          path === "/obfuscator/")
+      ) {
+        return html(obfuscatePage(env.SITE_NAME || "Greedy Hudzell"));
+      }
+
+      if (request.method === "POST" && path === "/api/syntax-check") {
+        let body;
         try {
-          const data = await fetchWeao();
-          const enriched = (Array.isArray(data) ? data : []).map((ex) => ({
-            ...ex,
-            ghSupport: supportFromExploit(ex),
-            isExternal: isExternal(ex),
-          }));
-          return json(enriched, 200, { "Cache-Control": "public, max-age=120" });
-        } catch (e) {
-          return json({ error: String(e.message || e) }, 502);
+          body = await request.json();
+        } catch {
+          return json({ ok: false, issues: ["invalid JSON"] }, 400);
         }
+        const sc = syntaxCheck(body.code || "");
+        if (!Array.isArray(sc.issues)) sc.issues = [];
+        return json(sc);
       }
 
-      if (path === "/api/syntax-check" && request.method === "POST") {
-        const body = await request.json().catch(() => ({}));
-        return json(syntaxCheckLua(body.code || ""));
-      }
+      if (request.method === "POST" && path === "/api/obfuscate") {
+        let body;
+        try {
+          body = await request.json();
+        } catch {
+          return json({ ok: false, error: "invalid JSON" }, 400);
+        }
+        const code = typeof body.code === "string" ? body.code : "";
+        const preset = body.preset || "medium";
+        if (!code || code.length < 2) return json({ ok: false, error: "empty code" }, 400);
+        if (code.length > 1_500_000) return json({ ok: false, error: "code too large" }, 413);
 
-      if (path === "/api/obfuscate" && request.method === "POST") {
-        const body = await request.json().catch(() => ({}));
-        const code = body.code || body.script || "";
-        if (!code) return json({ error: "Missing code" }, 400);
+        const apiKey = env.LUAOBF_API_KEY || LUAOBF_FALLBACK;
 
-        const key = env?.LUAOBF_KEY || env?.LUA_OBFUSCATOR_KEY;
-        if (!key) {
-          const mode = body.mode || "light";
-          let out = code;
-          if (mode === "longstr") out = `return assert(loadstring([====[\n${code}\n]====]))()`;
+        if (preset === "embed") {
+          return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
+        }
+        if (preset === "embed_bit32") {
+          let src = code;
+          const light = await callLuaObf(apiKey, code, presetConfig("light"));
+          if (light.ok) src = light.code;
           return json({
-            code: out,
-            note: "LUAOBF_KEY not set — local fallback only",
+            ok: true,
+            code: bit32Embed(src),
+            mode: "embed_bit32",
+            note: light.ok ? "api light + bit32 embed" : "bit32 only: " + (light.error || ""),
           });
         }
 
-        try {
-          const up = await fetch("https://api.luaobfuscator.com/v1/obfuscate", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              apikey: key,
-              Authorization: key,
-            },
-            body: JSON.stringify({ script: code, code }),
-          });
-          const text = await up.text();
-          let parsed = null;
-          try {
-            parsed = JSON.parse(text);
-          } catch (_) {}
-          if (!up.ok) {
-            return json(
-              {
-                error:
-                  (parsed && (parsed.message || parsed.error)) ||
-                  text.trim() ||
-                  "Upstream HTTP " + up.status,
-              },
-              502
-            );
-          }
-          const result =
-            (parsed && (parsed.code || parsed.result || parsed.script || parsed.obfuscated)) ||
-            (text && !text.trim().startsWith("{") ? text : "");
-          if (!result || !String(result).trim()) {
-            return json(
-              {
-                error: "Upstream returned empty result — check LUAOBF_KEY / API path",
-                raw: String(text).slice(0, 200),
-              },
-              502
-            );
-          }
-          return json({ code: result });
-        } catch (e) {
-          return json({ error: String(e.message || e) }, 502);
-        }
+        const cfg = preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset);
+        const result = await callLuaObf(apiKey, code, cfg);
+        if (!result.ok) return json(result, 502);
+        return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
       }
 
-      if (path === "/api/admin/status" && request.method === "POST") {
-        const auth = request.headers.get("Authorization") || "";
-        const secret = env?.ADMIN_SECRET || env?.BOT_SECRET;
-        if (!secret || auth !== "Bearer " + secret) return json({ error: "unauthorized" }, 401);
-        const patch = await request.json().catch(() => ({}));
-        const cur = await getStatus(env);
-        if (patch.ban_wave) cur.ban_wave = { ...cur.ban_wave, ...patch.ban_wave };
-        if (patch.announcement !== undefined) cur.announcement = patch.announcement;
-        if (patch.clear_announcement) cur.announcement = null;
-        if (patch.ban_wave_clear) cur.ban_wave = { ...cur.ban_wave, active: false };
-        try {
-          await setStatus(env, cur);
-        } catch (e) {
-          return json({ error: String(e.message || e), status: cur }, 500);
-        }
-        return json({ ok: true, status: cur });
+      // --- HOME ---
+      if (request.method === "GET" && path === "/") {
+        return html(
+          pageShell(
+            env.SITE_NAME || "Greedy Hudzell",
+            `<div class="logo">${env.SITE_NAME || "Greedy Hudzell"}</div>
+            <p class="muted">Key system online.</p>
+            <div class="nav" style="margin-top:18px">
+              <a href="/obfuscator">Lua Obfuscator →</a>
+              <a href="https://discord.gg/sbVuaT9a2T">Discord</a>
+            </div>`
+          )
+        );
       }
 
-      const status = await getStatus(env);
-      const html = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=30" };
 
-      if (path === "/" || path === "/index.html") return new Response(pageHome(status), { headers: html });
-      if (path === "/status") return new Response(pageStatus(status), { headers: html });
-      if (path === "/executors") return new Response(pageExecutors(), { headers: html });
-      if (path === "/guide") return new Response(pageGuide(), { headers: html });
-      if (path === "/tos" || path === "/terms") return new Response(pageTos(), { headers: html });
-      if (path === "/obfuscator") return new Response(pageObfuscator(), { headers: html });
 
-      return new Response(pageHome(status), { headers: html });
-    } catch (err) {
-      return new Response("Internal error: " + (err.message || err), { status: 500 });
+      const adminMatch = path.match(/^\/keys\/([^/]+)\/encrypted\/get-keys-all$/);
+      if (request.method === "GET" && adminMatch) return await handleAdminKeys(request, env, adminMatch[1]);
+      if (request.method === "POST" && path === "/admin/revoke") return await handleAdminRevoke(request, env);
+      const adminKeyMatch = path.match(/^\/admin\/key\/(.+)$/);
+      if (request.method === "GET" && adminKeyMatch) {
+        return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
+      }
+
+      return json({ error: "Not found" }, 404);
+    } catch (error) {
+      console.error("Worker error:", error);
+      return json({ error: "Internal server error" }, 500);
     }
   },
 };
