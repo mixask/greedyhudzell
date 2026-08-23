@@ -19,8 +19,8 @@ const SESSION_TTL = 30 * 60;
 const KEY_TTL = 24 * 60 * 60;
 
 const GH = "https://raw.githubusercontent.com/mixask/GH/main";
-const LUAOBF_NEW = "https://api.luaobfuscator.com/v1/obfuscator/newscript";
-const LUAOBF_RUN = "https://api.luaobfuscator.com/v1/obfuscator/obfuscate";
+const LUAOBF_NEW = "https://luaobfuscator.com/api/obfuscator/newscript";
+const LUAOBF_RUN = "https://luaobfuscator.com/api/obfuscator/obfuscate";
 const LUAOBF_FALLBACK = "11ad3847-d943-4a76-ee19-f9acab3e85144ea9";
 
 const jsonHeaders = {
@@ -453,29 +453,45 @@ async function proxyGithub(file) {
 
 /* ===================== OBFUSCATOR ===================== */
 const PLUGIN_DEFS = [
+  // From luaobfuscator Discord / forum docs — values are percentage args
   { key: "EncryptStrings", label: "Encrypt Strings", args: [100] },
-  { key: "SwizzleLookups", label: "Table indirection (SwizzleLookups)", args: [100] },
-  { key: "EncryptFuncDeclaration", label: "Encrypt Func Declaration", args: [100] },
-  { key: "ControlFlowFlattenV1AllBlocks", label: "Control Flow Flatten", args: [75, 75, 33] },
+  { key: "SwizzleLookups", label: "Swizzle Lookups (foo.bar → foo[\"bar\"])", args: [100] },
+  { key: "TableIndirection", label: "Table Indirection (locals → table)", args: [100] },
+  { key: "EncryptFuncDeclaration", label: "Encrypt Func Declaration", args: [] },
+  { key: "ControlFlowFlattenV1AllBlocks", label: "Control Flow Flatten V1", args: [75] },
+  { key: "ControlFlowFlattenAllBlocks", label: "Control Flow Flatten (alt)", args: [75] },
   { key: "RevertAllIfStatements", label: "Revert If Statements", args: [50] },
-  { key: "MixedBooleanArithmetic", label: "Mixed Boolean Arithmetic", args: [75] },
-  { key: "MutateAllLiterals", label: "Mutate Literals", args: [20] },
   { key: "JunkifyAllIfStatements", label: "Junkify If Statements", args: [50] },
+  { key: "MixedBooleanArithmetic", label: "Mixed Boolean Arithmetic", args: [75] },
+  { key: "MutateAllLiterals", label: "Mutate Literals", args: [50] },
+  { key: "DummyFunctionArgs", label: "Dummy Function Args", args: [1, 3] },
 ];
 
 function presetConfig(preset) {
+  // Root keys: MinifiyAll (typo from upstream), Virtualize, ASCIIArt, CustomPlugins
   if (preset === "basic" || preset === "light") {
-    return { MinifiyAll: true, CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100] } };
+    return {
+      MinifiyAll: true,
+      Virtualize: false,
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        TableIndirection: [100],
+      },
+    };
   }
   if (preset === "medium") {
     return {
       MinifiyAll: true,
+      Virtualize: false,
       CustomPlugins: {
         SwizzleLookups: [100],
         EncryptStrings: [100],
-        ControlFlowFlattenV1AllBlocks: [50, 50, 25],
+        TableIndirection: [100],
+        ControlFlowFlattenV1AllBlocks: [75],
+        RevertAllIfStatements: [50],
+        MutateAllLiterals: [40],
         JunkifyAllIfStatements: [40],
-        MutateAllLiterals: [15],
       },
     };
   }
@@ -483,24 +499,28 @@ function presetConfig(preset) {
     return {
       MinifiyAll: true,
       Virtualize: true,
+      ASCIIArt: "feet_1",
       CustomPlugins: {
         SwizzleLookups: [100],
         EncryptStrings: [100],
-        EncryptFuncDeclaration: [100],
-        ControlFlowFlattenV1AllBlocks: [75, 75, 33],
+        TableIndirection: [100],
+        EncryptFuncDeclaration: [],
+        ControlFlowFlattenV1AllBlocks: [100],
+        RevertAllIfStatements: [75],
         MixedBooleanArithmetic: [75],
-        MutateAllLiterals: [25],
+        MutateAllLiterals: [60],
         JunkifyAllIfStatements: [50],
+        DummyFunctionArgs: [1, 3],
       },
     };
   }
   return {
     MinifiyAll: true,
+    Virtualize: false,
     CustomPlugins: {
       SwizzleLookups: [100],
       EncryptStrings: [100],
-      ControlFlowFlattenV1AllBlocks: [50, 50, 25],
-      JunkifyAllIfStatements: [30],
+      TableIndirection: [100],
     },
   };
 }
@@ -512,9 +532,12 @@ function buildConfigFromOptions(opts) {
     Virtualize: !!opts.Virtualize,
   };
   if (opts.Multifile) cfg.Multifile = true;
+  if (opts.ASCIIArt) cfg.ASCIIArt = opts.ASCIIArt;
   const plugins = {};
   for (const p of PLUGIN_DEFS) {
-    if (opts[p.key]) plugins[p.key] = p.args;
+    if (opts[p.key]) {
+      plugins[p.key] = Array.isArray(p.args) ? p.args : [];
+    }
   }
   if (Object.keys(plugins).length) cfg.CustomPlugins = plugins;
   return cfg;
@@ -830,14 +853,19 @@ async function withTimeout(promise, ms) {
 }
 
 async function callLuaObf(apiKey, code, cfg) {
+  // Docs: POST https://luaobfuscator.com/api/obfuscator/newscript
+  // body = raw lua, header apikey
   const newRes = await fetch(LUAOBF_NEW, {
     method: "POST",
-    headers: { "content-type": "text/plain; charset=utf-8", apikey: apiKey },
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      apikey: apiKey,
+    },
     body: code,
   });
   if (!newRes.ok) {
     const t = await newRes.text();
-    return { ok: false, error: `newscript HTTP ${newRes.status}: ${t.slice(0, 240)}` };
+    return { ok: false, error: `newscript HTTP ${newRes.status}: ${t.slice(0, 300)}` };
   }
   let session;
   try {
@@ -845,20 +873,27 @@ async function callLuaObf(apiKey, code, cfg) {
   } catch {
     return { ok: false, error: "newscript: invalid JSON" };
   }
-  if (!session.sessionId) return { ok: false, error: session.message || "no sessionId" };
+  const sessionId =
+    session.sessionId ||
+    newRes.headers.get("sessionId") ||
+    newRes.headers.get("sessionid");
+  if (!sessionId) {
+    return { ok: false, error: session.message || "no sessionId from newscript" };
+  }
 
+  // Docs: POST .../obfuscate  headers apikey + sessionId, body = config JSON
   const runRes = await fetch(LUAOBF_RUN, {
     method: "POST",
     headers: {
-      "content-type": "application/json",
+      "Content-Type": "application/json",
       apikey: apiKey,
-      sessionId: session.sessionId,
+      sessionId: sessionId,
     },
-    body: JSON.stringify(cfg),
+    body: JSON.stringify(cfg || {}),
   });
   if (!runRes.ok) {
     const t = await runRes.text();
-    return { ok: false, error: `obfuscate HTTP ${runRes.status}: ${t.slice(0, 240)}` };
+    return { ok: false, error: `obfuscate HTTP ${runRes.status}: ${t.slice(0, 300)}` };
   }
   let out;
   try {
@@ -866,8 +901,10 @@ async function callLuaObf(apiKey, code, cfg) {
   } catch {
     return { ok: false, error: "obfuscate: invalid JSON" };
   }
-  if (!out.code) return { ok: false, error: out.message || "empty code from API" };
-  return { ok: true, code: out.code, sessionId: session.sessionId };
+  if (!out.code) {
+    return { ok: false, error: out.message || "empty code from API" };
+  }
+  return { ok: true, code: out.code, sessionId };
 }
 
 function syntaxCheck(code) {
@@ -996,7 +1033,7 @@ function obfuscatePage(siteName) {
     "Obfuscator · " + siteName,
     `
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">Basic/Medium/Full differ in strength. VM needs API (Virtualize). If API is rate-limited, local L2/L3 is used — not the same as Basic.</p>
+<p class="muted">API: luaobfuscator.com/api (session + plugins). Basic=local L1. Medium/Full/VM=API first, local fallback if 429.</p>
 
 <label>Preset</label>
 <select id="preset">
