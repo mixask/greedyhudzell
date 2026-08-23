@@ -543,6 +543,135 @@ return _fn()
   return `return loadstring([=====[\n${payload}\n]=====])()`;
 }
 
+
+/** Local Basic obfuscation — no external API (works on 429).
+ *  string encryption + simple table indirection + bit32 embed option applied by caller
+ */
+function localBasicObfuscate(code) {
+  const strings = [];
+  let out = "";
+  let i = 0;
+  while (i < code.length) {
+    const c = code[i];
+    if (c === "-" && code[i + 1] === "-") {
+      let j = i + 2;
+      if (code[j] === "[") {
+        let n = 0;
+        j++;
+        while (code[j] === "=") { n++; j++; }
+        if (code[j] === "[") {
+          j++;
+          while (j < code.length) {
+            if (code[j] === "]") {
+              let k = j + 1, m = 0;
+              while (code[k] === "=") { m++; k++; }
+              if (m === n && code[k] === "]") { j = k + 1; break; }
+            }
+            j++;
+          }
+          out += code.slice(i, j);
+          i = j;
+          continue;
+        }
+      }
+      while (i < code.length && code[i] !== "\n") { out += code[i]; i++; }
+      continue;
+    }
+    if (c === "[" && (code[i + 1] === "[" || code[i + 1] === "=")) {
+      let j = i + 1, n = 0;
+      if (code[j] === "=") {
+        while (code[j] === "=") { n++; j++; }
+      }
+      if (code[j] === "[") {
+        j++;
+        while (j < code.length) {
+          if (code[j] === "]") {
+            let k = j + 1, m = 0;
+            while (code[k] === "=") { m++; k++; }
+            if (m === n && code[k] === "]") { j = k + 1; break; }
+          }
+          j++;
+        }
+        out += code.slice(i, j);
+        i = j;
+        continue;
+      }
+    }
+    if (c === '"' || c === "'") {
+      const q = c;
+      let j = i + 1;
+      let lit = "";
+      while (j < code.length) {
+        if (code[j] === "\\") {
+          lit += code[j] + (code[j + 1] || "");
+          j += 2;
+          continue;
+        }
+        if (code[j] === q) { j++; break; }
+        lit += code[j];
+        j++;
+      }
+      const raw = lit
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'")
+        .replace(/\\\\/g, "\\");
+      const idx = strings.length;
+      strings.push(raw);
+      out += "_S[" + (idx + 1) + "]";
+      i = j;
+      continue;
+    }
+    out += c;
+    i++;
+  }
+
+  const aliases = {
+    game: "_T[1]",
+    workspace: "_T[2]",
+    pairs: "_T[3]",
+    ipairs: "_T[4]",
+    pcall: "_T[5]",
+    type: "_T[6]",
+    tostring: "_T[7]",
+    tonumber: "_T[8]",
+    print: "_T[9]",
+    warn: "_T[10]",
+    select: "_T[11]",
+    next: "_T[12]",
+  };
+  let body = out;
+  for (const [name, repl] of Object.entries(aliases)) {
+    const re = new RegExp("\\b" + name + "\\b", "g");
+    body = body.replace(re, repl);
+  }
+
+  const strTable = strings.map((s) => {
+    const bytes = [];
+    for (let k = 0; k < s.length; k++) {
+      bytes.push(s.charCodeAt(k) ^ (0x5a + (k % 13)));
+    }
+    return "{" + bytes.join(",") + "}";
+  }).join(",");
+
+  const header =
+    "-- GH basic local obfuscate\n" +
+    "local _T={game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next}\n" +
+    "local _S={}\n" +
+    "do\n" +
+    "  local _d={" + strTable + "}\n" +
+    "  for _i=1,#_d do\n" +
+    "    local _b=_d[_i]\n" +
+    "    local _o={}\n" +
+    "    for _j=1,#_b do _o[_j]=string.char(bit32.bxor(_b[_j],(0x5A+((_j-1)%13)))) end\n" +
+    "    _S[_i]=table.concat(_o)\n" +
+    "  end\n" +
+    "end\n";
+
+  return header + "\n" + body + "\n";
+}
+
 async function callLuaObf(apiKey, code, cfg) {
   const newRes = await fetch(LUAOBF_NEW, {
     method: "POST",
@@ -709,13 +838,8 @@ function obfuscatePage(siteName) {
   return pageShell(
     "Obfuscator · " + siteName,
     `
-<div class="nav">
-  <a href="/">${siteName}</a>
-  <a href="/obfuscator">Obfuscator</a>
-  <a href="https://discord.gg/sbVuaT9a2T">Discord</a>
-</div>
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">One page. No tabs. luaobfuscator.com API + local bit32 embed.</p>
+<p class="muted">Single page. Basic = local (no API). Medium/Full use API when available.</p>
 
 <label>Preset</label>
 <select id="preset">
@@ -861,35 +985,54 @@ export default {
         if (preset === "embed") {
           return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
         }
-        // Basic = table indirection + strings (+ optional bit32 wrap)
-        if (preset === "basic" || preset === "embed_bit32") {
+        // Basic = local table indirection + strings + bit32 (no API — avoids 429)
+        if (preset === "basic") {
+          try {
+            const src = localBasicObfuscate(code);
+            return json({
+              ok: true,
+              code: bit32Embed(src),
+              mode: "basic",
+              note: "local table+strings+bit32 (no API)",
+            });
+          } catch (e) {
+            return json({ ok: false, error: "local basic failed: " + String(e && e.message ? e.message : e) }, 500);
+          }
+        }
+        if (preset === "embed_bit32") {
+          // try API light once; on 429 fall back to local
           let src = code;
-          let note = "";
-          const light = await callLuaObf(apiKey, code, presetConfig("basic"));
+          let note = "local";
+          const light = await callLuaObf(apiKey, code, presetConfig("light"));
           if (light.ok) {
             src = light.code;
-            note = "swizzle+strings ok";
+            note = "api light";
           } else {
-            note = "api failed, bit32-only: " + (light.error || "unknown");
-            // still return bit32 of original so UI is not empty "error"
+            src = localBasicObfuscate(code);
+            note = "api fail -> local: " + (light.error || "");
           }
-          return json({
-            ok: true,
-            code: bit32Embed(src),
-            mode: preset === "basic" ? "basic" : "embed_bit32",
-            note,
-            api_ok: !!light.ok,
-          });
+          return json({ ok: true, code: bit32Embed(src), mode: "embed_bit32", note });
         }
 
         const cfg = preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset);
         try {
           const result = await callLuaObf(apiKey, code, cfg);
           if (!result.ok) {
+            const err = result.error || "obfuscate failed";
+            // 429 / rate limit -> local basic fallback
+            if (/429|1015|rate/i.test(err)) {
+              const src = localBasicObfuscate(code);
+              return json({
+                ok: true,
+                code: bit32Embed(src),
+                mode: "basic_fallback",
+                note: "API rate-limited (429/1015), used local basic",
+              });
+            }
             return json({
               ok: false,
-              error: result.error || "obfuscate failed",
-              hint: "If this persists, try preset Basic or Embed. API may be rate-limited.",
+              error: err,
+              hint: "Try preset Basic (local, no API) or wait for rate limit.",
             }, 502);
           }
           return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
