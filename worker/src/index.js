@@ -547,52 +547,119 @@ return _fn()
 /** Local Basic obfuscation — no external API (works on 429).
  *  string encryption + simple table indirection + bit32 embed option applied by caller
  */
-function localBasicObfuscate(code) {
+
+/** Expand [====[ inner ]====] blocks: if inner looks like Lua, obfuscate inner too */
+
+/** Split by long brackets [=[...]=] / [====[... ]====] */
+function mapLongBrackets(code, onCodeSegment, onBracketInner) {
+  let i = 0;
+  let out = "";
+  while (i < code.length) {
+    if (code[i] === "[") {
+      let j = i + 1;
+      let n = 0;
+      while (code[j] === "=") { n++; j++; }
+      if (code[j] === "[") {
+        const openEnd = j + 1;
+        let k = openEnd;
+        let closeAt = -1;
+        while (k < code.length) {
+          if (code[k] === "]") {
+            let m = 0;
+            let p = k + 1;
+            while (code[p] === "=") { m++; p++; }
+            if (m === n && code[p] === "]") {
+              closeAt = k;
+              break;
+            }
+          }
+          k++;
+        }
+        if (closeAt >= 0) {
+          const before = code.slice(
+            out.length === 0 && i === 0 ? 0 : i,
+            i
+          );
+          // flush plain before this bracket from last index — handled by walking
+          const inner = code.slice(openEnd, closeAt);
+          const closeEnd = closeAt + 1 + n + 1;
+          const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
+          let eqs = n;
+          let body = inner;
+          if (looksCode && inner.trim().length > 8) {
+            body = onBracketInner(inner);
+            while (body.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 10) eqs++;
+          }
+          out += "[" + "=".repeat(eqs) + "[" + body + "]" + "=".repeat(eqs) + "]";
+          i = closeEnd;
+          continue;
+        }
+      }
+    }
+    // accumulate plain char — batch for speed
+    let startPlain = i;
+    while (i < code.length) {
+      if (code[i] === "[") {
+        let j = i + 1, n = 0;
+        while (code[j] === "=") { n++; j++; }
+        if (code[j] === "[") break;
+      }
+      i++;
+    }
+    const plain = code.slice(startPlain, i);
+    if (plain) out += onCodeSegment(plain);
+  }
+  return out;
+}
+
+function encryptStringsAndAlias(src) {
   const strings = [];
   let out = "";
   let i = 0;
-  while (i < code.length) {
-    const c = code[i];
-    if (c === "-" && code[i + 1] === "-") {
+  while (i < src.length) {
+    const c = src[i];
+    // comments
+    if (c === "-" && src[i + 1] === "-") {
       let j = i + 2;
-      if (code[j] === "[") {
+      if (src[j] === "[") {
         let n = 0;
         j++;
-        while (code[j] === "=") { n++; j++; }
-        if (code[j] === "[") {
+        while (src[j] === "=") { n++; j++; }
+        if (src[j] === "[") {
           j++;
-          while (j < code.length) {
-            if (code[j] === "]") {
+          while (j < src.length) {
+            if (src[j] === "]") {
               let k = j + 1, m = 0;
-              while (code[k] === "=") { m++; k++; }
-              if (m === n && code[k] === "]") { j = k + 1; break; }
+              while (src[k] === "=") { m++; k++; }
+              if (m === n && src[k] === "]") { j = k + 1; break; }
             }
             j++;
           }
-          out += code.slice(i, j);
+          out += src.slice(i, j);
           i = j;
           continue;
         }
       }
-      while (i < code.length && code[i] !== "\n") { out += code[i]; i++; }
+      while (i < src.length && src[i] !== "\n") { out += src[i]; i++; }
       continue;
     }
-    if (c === "[" && (code[i + 1] === "[" || code[i + 1] === "=")) {
+    // skip nested long brackets here (already handled outside)
+    if (c === "[" && (src[i + 1] === "[" || src[i + 1] === "=")) {
       let j = i + 1, n = 0;
-      if (code[j] === "=") {
-        while (code[j] === "=") { n++; j++; }
+      if (src[j] === "=") {
+        while (src[j] === "=") { n++; j++; }
       }
-      if (code[j] === "[") {
+      if (src[j] === "[") {
         j++;
-        while (j < code.length) {
-          if (code[j] === "]") {
+        while (j < src.length) {
+          if (src[j] === "]") {
             let k = j + 1, m = 0;
-            while (code[k] === "=") { m++; k++; }
-            if (m === n && code[k] === "]") { j = k + 1; break; }
+            while (src[k] === "=") { m++; k++; }
+            if (m === n && src[k] === "]") { j = k + 1; break; }
           }
           j++;
         }
-        out += code.slice(i, j);
+        out += src.slice(i, j);
         i = j;
         continue;
       }
@@ -601,14 +668,14 @@ function localBasicObfuscate(code) {
       const q = c;
       let j = i + 1;
       let lit = "";
-      while (j < code.length) {
-        if (code[j] === "\\") {
-          lit += code[j] + (code[j + 1] || "");
+      while (j < src.length) {
+        if (src[j] === "\\") {
+          lit += src[j] + (src[j + 1] || "");
           j += 2;
           continue;
         }
-        if (code[j] === q) { j++; break; }
-        lit += code[j];
+        if (src[j] === q) { j++; break; }
+        lit += src[j];
         j++;
       }
       const raw = lit
@@ -617,9 +684,8 @@ function localBasicObfuscate(code) {
         .replace(/\\"/g, '"')
         .replace(/\\'/g, "'")
         .replace(/\\\\/g, "\\");
-      const idx = strings.length;
       strings.push(raw);
-      out += "_S[" + (idx + 1) + "]";
+      out += "_S[" + strings.length + "]";
       i = j;
       continue;
     }
@@ -643,8 +709,7 @@ function localBasicObfuscate(code) {
   };
   let body = out;
   for (const [name, repl] of Object.entries(aliases)) {
-    const re = new RegExp("\\b" + name + "\\b", "g");
-    body = body.replace(re, repl);
+    body = body.replace(new RegExp("\\b" + name + "\\b", "g"), repl);
   }
 
   const strTable = strings.map((s) => {
@@ -655,21 +720,222 @@ function localBasicObfuscate(code) {
     return "{" + bytes.join(",") + "}";
   }).join(",");
 
-  const header =
-    "-- GH basic local obfuscate\n" +
+  // if no strings and no aliases changed, still return body with empty _S
+  return {
+    body,
+    strTable,
+    hasStrings: strings.length > 0,
+  };
+}
+
+function wrapWithRuntime(body, strTable) {
+  return (
+    "-- GH basic (local)\n" +
     "local _T={game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next}\n" +
     "local _S={}\n" +
-    "do\n" +
-    "  local _d={" + strTable + "}\n" +
-    "  for _i=1,#_d do\n" +
-    "    local _b=_d[_i]\n" +
-    "    local _o={}\n" +
-    "    for _j=1,#_b do _o[_j]=string.char(bit32.bxor(_b[_j],(0x5A+((_j-1)%13)))) end\n" +
-    "    _S[_i]=table.concat(_o)\n" +
-    "  end\n" +
-    "end\n";
+    "do local _d={" + strTable + "} " +
+    "for _i=1,#_d do local _b=_d[_i] local _o={} " +
+    "for _j=1,#_b do _o[_j]=string.char(bit32.bxor(_b[_j],(90+((_j-1)%13)))) end " +
+    "_S[_i]=table.concat(_o) end end\n" +
+    body
+  );
+}
 
-  return header + "\n" + body + "\n";
+/** Local Basic: obfuscate code + Lua inside [====[ ]====]. No loadstring wrap of whole file. */
+function localBasicObfuscate(code) {
+  // First pass: only transform insides of long brackets that look like Lua
+  let step1 = "";
+  {
+    let i = 0;
+    while (i < code.length) {
+      if (code[i] === "[") {
+        let j = i + 1, n = 0;
+        while (code[j] === "=") { n++; j++; }
+        if (code[j] === "[") {
+          const openEnd = j + 1;
+          let k = openEnd, closeAt = -1;
+          while (k < code.length) {
+            if (code[k] === "]") {
+              let m = 0, p = k + 1;
+              while (code[p] === "=") { m++; p++; }
+              if (m === n && code[p] === "]") { closeAt = k; break; }
+            }
+            k++;
+          }
+          if (closeAt >= 0) {
+            const inner = code.slice(openEnd, closeAt);
+            const closeEnd = closeAt + 1 + n + 1;
+            const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
+            if (looksCode && inner.trim().length > 8) {
+              const r = encryptStringsAndAlias(inner);
+              const ob = wrapWithRuntime(r.body, r.strTable);
+              let eqs = n;
+              while (ob.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 12) eqs++;
+              step1 += "[" + "=".repeat(eqs) + "[" + ob + "]" + "=".repeat(eqs) + "]";
+            } else {
+              step1 += code.slice(i, closeEnd);
+            }
+            i = closeEnd;
+            continue;
+          }
+        }
+      }
+      step1 += code[i];
+      i++;
+    }
+  }
+
+  // Second pass: obfuscate ONLY plain segments (do not touch long-bracket contents)
+  let step2 = "";
+  let allStrings = [];
+  let stringOffset = 0;
+  {
+    let i = 0;
+    let plain = "";
+    function flushPlain() {
+      if (!plain) return;
+      const r = encryptStringsAndAlias(plain);
+      // remap _S indices to global offset
+      let body = r.body;
+      if (r.hasStrings) {
+        // rebuild with offset
+        const parts = [];
+        let sidx = 0;
+        // re-extract was already done; simpler: run encrypt again collecting into allStrings
+        const r2 = encryptStringsAndAlias(plain);
+        // Actually append strings to global and re-number
+        const localCount = (r.strTable.match(/\{/g) || []).length;
+      }
+      // simpler approach: just append encrypted plain with local header only once at end
+      step2 += "\0PLAIN:" + plain + "\0";
+      plain = "";
+    }
+    // rewrite second pass more cleanly without the broken flush
+  }
+
+  // Cleaner second pass
+  step2 = "";
+  {
+    let i = 0;
+    while (i < step1.length) {
+      if (step1[i] === "[") {
+        let j = i + 1, n = 0;
+        while (step1[j] === "=") { n++; j++; }
+        if (step1[j] === "[") {
+          const openEnd = j + 1;
+          let k = openEnd, closeAt = -1;
+          while (k < step1.length) {
+            if (step1[k] === "]") {
+              let m = 0, p = k + 1;
+              while (step1[p] === "=") { m++; p++; }
+              if (m === n && step1[p] === "]") { closeAt = k; break; }
+            }
+            k++;
+          }
+          if (closeAt >= 0) {
+            // keep whole bracket as-is (already obfuscated if needed)
+            step2 += step1.slice(i, closeAt + 1 + n + 1);
+            i = closeAt + 1 + n + 1;
+            continue;
+          }
+        }
+      }
+      // gather plain run
+      let start = i;
+      while (i < step1.length) {
+        if (step1[i] === "[") {
+          let j = i + 1, n = 0;
+          while (step1[j] === "=") { n++; j++; }
+          if (step1[j] === "[") break;
+        }
+        i++;
+      }
+      const plain = step1.slice(start, i);
+      if (plain) {
+        const r = encryptStringsAndAlias(plain);
+        // temporary markers with full wrap deferred
+        step2 += "<<<CHUNK_START>>>" + JSON.stringify(r) + "<<<CHUNK_END>>>";
+      }
+    }
+  }
+
+  // Merge chunks into one runtime + concatenated bodies
+  const chunkRe = /<<<CHUNK_START>>>([\s\S]*?)<<<CHUNK_END>>>/g;
+  let mergedBody = "";
+  let mergedTables = [];
+  let sOff = 0;
+  let result = "";
+  let last = 0;
+  let m;
+  while ((m = chunkRe.exec(step2)) !== null) {
+    result += step2.slice(last, m.index);
+    const r = JSON.parse(m[1]);
+    let body = r.body;
+    if (r.hasStrings && r.strTable) {
+      // shift _S[n] by sOff
+      body = body.replace(/_S\[(\d+)\]/g, (_, n) => "_S[" + (Number(n) + sOff) + "]");
+      const tables = r.strTable ? r.strTable.split("},{").length : 0;
+      // count entries
+      const count = (r.strTable.match(/\{/g) || []).length;
+      if (r.strTable) mergedTables.push(r.strTable);
+      sOff += count;
+    }
+    mergedBody += body;
+    last = m.index + m[0].length;
+  }
+  result += step2.slice(last);
+
+  // If we only had bracket content and no plain, still ok
+  const strTable = mergedTables.join(",");
+  // Place runtime at start of whole file, then result with mergedBody embedded... 
+  // result still has brackets; mergedBody is only plain pieces that were replaced by markers.
+  // Rebuild: result currently is step2 with markers replaced by nothing yet — we built `result` as outside + we need to inject body at marker positions.
+
+  // Redo merge properly
+  result = "";
+  last = 0;
+  sOff = 0;
+  mergedTables = [];
+  chunkRe.lastIndex = 0;
+  while ((m = chunkRe.exec(step2)) !== null) {
+    result += step2.slice(last, m.index);
+    const r = JSON.parse(m[1]);
+    let body = r.body;
+    if (r.hasStrings && r.strTable) {
+      body = body.replace(/_S\[(\d+)\]/g, (_, n) => "_S[" + (Number(n) + sOff) + "]");
+      const count = (r.strTable.match(/\{/g) || []).length;
+      mergedTables.push(r.strTable);
+      sOff += count;
+    } else if (r.strTable) {
+      // no strings but still
+    }
+    // always apply alias body
+    if (!r.hasStrings) {
+      // body still has aliases applied
+    }
+    result += body;
+    last = m.index + m[0].length;
+  }
+  result += step2.slice(last);
+
+  const finalTable = mergedTables.join(",");
+  // Always add one runtime header for outer plain aliases/strings
+  // Bracket-inners already have their own runtime inside the brackets
+  return wrapWithRuntime(result, finalTable);
+}
+
+async function withTimeout(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, rej) => {
+        timer = setTimeout(() => rej(new Error("timeout " + ms + "ms")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function callLuaObf(apiKey, code, cfg) {
@@ -839,14 +1105,15 @@ function obfuscatePage(siteName) {
     "Obfuscator · " + siteName,
     `
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">Single page. Basic = local (no API). Medium/Full use API when available.</p>
+<p class="muted">Basic obfuscates code (and Lua inside [====[ ]). Does not wrap in loadstring. Medium/Full = API, fallback local.</p>
 
 <label>Preset</label>
 <select id="preset">
-  <option value="basic" selected>Basic — table indirection + strings + bit32</option>
+  <option value="basic" selected>Basic — table + strings (obfuscate code, incl. inside [====[ ])</option>
   <option value="medium">Medium — API plugins</option>
   <option value="full">Full — virtualize + plugins</option>
-  <option value="embed">Embed only [=====[ ]=====]</option>
+  <option value="embed">Wrap only loadstring([====[ ])</option>
+  <option value="embed_bit32">Wrap bit32 + loadstring</option>
   <option value="custom">Custom checkboxes</option>
 </select>
 
@@ -915,7 +1182,7 @@ runBtn.onclick=async()=>{
       statusEl.innerHTML='<span class="error">'+(data.error||'failed')+(data.hint?('<br>'+data.hint):'')+'</span>';
     } else {
       output.value=data.code||'';
-      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars'+(data.note?(' · '+data.note):'')+'</span>';
+      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>'+(data.note?('<br><span class="muted">'+data.note+'</span>'):'');
     }
   }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
   runBtn.disabled=false;
@@ -985,15 +1252,15 @@ export default {
         if (preset === "embed") {
           return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
         }
-        // Basic = local table indirection + strings + bit32 (no API — avoids 429)
+        // Basic = local table + strings, obfuscate [====[ code ]====] inners. NO loadstring wrap.
         if (preset === "basic") {
           try {
             const src = localBasicObfuscate(code);
             return json({
               ok: true,
-              code: bit32Embed(src),
+              code: src,
               mode: "basic",
-              note: "local table+strings+bit32 (no API)",
+              note: "local table+strings; long-bracket inners obfuscated",
             });
           } catch (e) {
             return json({ ok: false, error: "local basic failed: " + String(e && e.message ? e.message : e) }, 500);
@@ -1014,30 +1281,29 @@ export default {
           return json({ ok: true, code: bit32Embed(src), mode: "embed_bit32", note });
         }
 
+        // Medium / Full / Custom: try API once (8s). Any fail -> local basic. No spam needed.
         const cfg = preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset);
         try {
-          const result = await callLuaObf(apiKey, code, cfg);
-          if (!result.ok) {
-            const err = result.error || "obfuscate failed";
-            // 429 / rate limit -> local basic fallback
-            if (/429|1015|rate/i.test(err)) {
-              const src = localBasicObfuscate(code);
-              return json({
-                ok: true,
-                code: bit32Embed(src),
-                mode: "basic_fallback",
-                note: "API rate-limited (429/1015), used local basic",
-              });
-            }
-            return json({
-              ok: false,
-              error: err,
-              hint: "Try preset Basic (local, no API) or wait for rate limit.",
-            }, 502);
+          const result = await withTimeout(callLuaObf(apiKey, code, cfg), 8000);
+          if (result && result.ok && result.code) {
+            return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
           }
-          return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
+          const err = (result && result.error) || "api failed";
+          const src = localBasicObfuscate(code);
+          return json({
+            ok: true,
+            code: src,
+            mode: "basic_fallback",
+            note: "API unavailable (" + err + ") — local basic used",
+          });
         } catch (e) {
-          return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+          const src = localBasicObfuscate(code);
+          return json({
+            ok: true,
+            code: src,
+            mode: "basic_fallback",
+            note: "API error/timeout — local basic used: " + String(e && e.message ? e.message : e),
+          });
         }
       }
 
