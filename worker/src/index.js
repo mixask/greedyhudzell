@@ -465,22 +465,31 @@ const PLUGIN_DEFS = [
 
 function presetConfig(preset) {
   if (preset === "basic" || preset === "light") {
-    // table indirection + strings
     return { MinifiyAll: true, CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100] } };
   }
-  if (preset === "full") {
+  if (preset === "medium") {
     return {
       MinifiyAll: true,
-      ASCIIArt: "feet_1",
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        ControlFlowFlattenV1AllBlocks: [50, 50, 25],
+        JunkifyAllIfStatements: [40],
+        MutateAllLiterals: [15],
+      },
+    };
+  }
+  if (preset === "full" || preset === "vm") {
+    return {
+      MinifiyAll: true,
       Virtualize: true,
       CustomPlugins: {
         SwizzleLookups: [100],
         EncryptStrings: [100],
         EncryptFuncDeclaration: [100],
-        RevertAllIfStatements: [50],
         ControlFlowFlattenV1AllBlocks: [75, 75, 33],
         MixedBooleanArithmetic: [75],
-        MutateAllLiterals: [20],
+        MutateAllLiterals: [25],
         JunkifyAllIfStatements: [50],
       },
     };
@@ -550,80 +559,30 @@ return _fn()
 
 /** Expand [====[ inner ]====] blocks: if inner looks like Lua, obfuscate inner too */
 
-/** Split by long brackets [=[...]=] / [====[... ]====] */
-function mapLongBrackets(code, onCodeSegment, onBracketInner) {
-  let i = 0;
-  let out = "";
-  while (i < code.length) {
-    if (code[i] === "[") {
-      let j = i + 1;
-      let n = 0;
-      while (code[j] === "=") { n++; j++; }
-      if (code[j] === "[") {
-        const openEnd = j + 1;
-        let k = openEnd;
-        let closeAt = -1;
-        while (k < code.length) {
-          if (code[k] === "]") {
-            let m = 0;
-            let p = k + 1;
-            while (code[p] === "=") { m++; p++; }
-            if (m === n && code[p] === "]") {
-              closeAt = k;
-              break;
-            }
-          }
-          k++;
-        }
-        if (closeAt >= 0) {
-          const before = code.slice(
-            out.length === 0 && i === 0 ? 0 : i,
-            i
-          );
-          // flush plain before this bracket from last index — handled by walking
-          const inner = code.slice(openEnd, closeAt);
-          const closeEnd = closeAt + 1 + n + 1;
-          const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
-          let eqs = n;
-          let body = inner;
-          if (looksCode && inner.trim().length > 8) {
-            body = onBracketInner(inner);
-            while (body.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 10) eqs++;
-          }
-          out += "[" + "=".repeat(eqs) + "[" + body + "]" + "=".repeat(eqs) + "]";
-          i = closeEnd;
-          continue;
-        }
-      }
-    }
-    // accumulate plain char — batch for speed
-    let startPlain = i;
-    while (i < code.length) {
-      if (code[i] === "[") {
-        let j = i + 1, n = 0;
-        while (code[j] === "=") { n++; j++; }
-        if (code[j] === "[") break;
-      }
-      i++;
-    }
-    const plain = code.slice(startPlain, i);
-    if (plain) out += onCodeSegment(plain);
+
+/* ===================== LOCAL OBFUSCATOR (multi-level) ===================== */
+
+function _ghXorStr(s, seed) {
+  const bytes = [];
+  for (let k = 0; k < s.length; k++) {
+    bytes.push(s.charCodeAt(k) ^ ((seed + k * 7) & 255));
   }
-  return out;
+  return bytes;
 }
 
-function encryptStringsAndAlias(src) {
+function _ghParseStringsAndComments(src, opts) {
+  // returns { code: with _S[n] placeholders, strings: string[] }
   const strings = [];
   let out = "";
   let i = 0;
+  const encrypt = opts.encryptStrings !== false;
   while (i < src.length) {
     const c = src[i];
     // comments
     if (c === "-" && src[i + 1] === "-") {
       let j = i + 2;
       if (src[j] === "[") {
-        let n = 0;
-        j++;
+        let n = 0; j++;
         while (src[j] === "=") { n++; j++; }
         if (src[j] === "[") {
           j++;
@@ -635,20 +594,19 @@ function encryptStringsAndAlias(src) {
             }
             j++;
           }
-          out += src.slice(i, j);
-          i = j;
-          continue;
+          if (!opts.stripComments) out += src.slice(i, j);
+          i = j; continue;
         }
       }
-      while (i < src.length && src[i] !== "\n") { out += src[i]; i++; }
+      const lineStart = i;
+      while (i < src.length && src[i] !== "\n") i++;
+      if (!opts.stripComments) out += src.slice(lineStart, i);
       continue;
     }
-    // skip nested long brackets here (already handled outside)
+    // long brackets kept as-is here
     if (c === "[" && (src[i + 1] === "[" || src[i + 1] === "=")) {
       let j = i + 1, n = 0;
-      if (src[j] === "=") {
-        while (src[j] === "=") { n++; j++; }
-      }
+      if (src[j] === "=") { while (src[j] === "=") { n++; j++; } }
       if (src[j] === "[") {
         j++;
         while (j < src.length) {
@@ -660,268 +618,201 @@ function encryptStringsAndAlias(src) {
           j++;
         }
         out += src.slice(i, j);
-        i = j;
-        continue;
+        i = j; continue;
       }
     }
-    if (c === '"' || c === "'") {
+    if (encrypt && (c === '"' || c === "'")) {
       const q = c;
-      let j = i + 1;
-      let lit = "";
+      let j = i + 1, lit = "";
       while (j < src.length) {
-        if (src[j] === "\\") {
-          lit += src[j] + (src[j + 1] || "");
-          j += 2;
-          continue;
-        }
+        if (src[j] === "\\") { lit += src[j] + (src[j + 1] || ""); j += 2; continue; }
         if (src[j] === q) { j++; break; }
-        lit += src[j];
-        j++;
+        lit += src[j]; j++;
       }
       const raw = lit
-        .replace(/\\n/g, "\n")
-        .replace(/\\t/g, "\t")
-        .replace(/\\"/g, '"')
-        .replace(/\\'/g, "'")
+        .replace(/\\n/g, "\n").replace(/\\t/g, "\t")
+        .replace(/\\"/g, '"').replace(/\\'/g, "'")
         .replace(/\\\\/g, "\\");
       strings.push(raw);
       out += "_S[" + strings.length + "]";
-      i = j;
-      continue;
+      i = j; continue;
     }
-    out += c;
-    i++;
+    out += c; i++;
   }
+  return { code: out, strings };
+}
 
-  const aliases = {
-    game: "_T[1]",
-    workspace: "_T[2]",
-    pairs: "_T[3]",
-    ipairs: "_T[4]",
-    pcall: "_T[5]",
-    type: "_T[6]",
-    tostring: "_T[7]",
-    tonumber: "_T[8]",
-    print: "_T[9]",
-    warn: "_T[10]",
-    select: "_T[11]",
-    next: "_T[12]",
-  };
-  let body = out;
+function _ghAliasGlobals(code, level) {
+  // level 1: few, level 2: more, level 3: aggressive
+  const sets = [
+    { game: "_T[1]", workspace: "_T[2]", print: "_T[3]", warn: "_T[4]" },
+    { game: "_T[1]", workspace: "_T[2]", pairs: "_T[3]", ipairs: "_T[4]", pcall: "_T[5]",
+      type: "_T[6]", tostring: "_T[7]", tonumber: "_T[8]", print: "_T[9]", warn: "_T[10]",
+      select: "_T[11]", next: "_T[12]", rawget: "_T[13]", rawset: "_T[14]" },
+    { game: "_T[1]", workspace: "_T[2]", pairs: "_T[3]", ipairs: "_T[4]", pcall: "_T[5]",
+      type: "_T[6]", tostring: "_T[7]", tonumber: "_T[8]", print: "_T[9]", warn: "_T[10]",
+      select: "_T[11]", next: "_T[12]", rawget: "_T[13]", rawset: "_T[14]",
+      require: "_T[15]", tick: "_T[16]", typeof: "_T[17]", unpack: "_T[18]", error: "_T[19]", assert: "_T[20]" },
+  ];
+  const aliases = sets[Math.max(0, Math.min(2, level - 1))];
+  let body = code;
   for (const [name, repl] of Object.entries(aliases)) {
     body = body.replace(new RegExp("\\b" + name + "\\b", "g"), repl);
   }
-
-  const strTable = strings.map((s) => {
-    const bytes = [];
-    for (let k = 0; k < s.length; k++) {
-      bytes.push(s.charCodeAt(k) ^ (0x5a + (k % 13)));
-    }
-    return "{" + bytes.join(",") + "}";
-  }).join(",");
-
-  // if no strings and no aliases changed, still return body with empty _S
-  return {
-    body,
-    strTable,
-    hasStrings: strings.length > 0,
+  const list = {
+    1: "game,workspace,print,warn",
+    2: "game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next,rawget,rawset",
+    3: "game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next,rawget,rawset,require,tick,typeof,unpack or table.unpack,error,assert",
   };
+  return { body, tInit: list[level] || list[2] };
 }
 
-function wrapWithRuntime(body, strTable) {
+function _ghEncodeNumbers(code, level) {
+  if (level < 2) return code;
+  // replace standalone integers 2..99999 with expression (not in _S/_T indices carefully)
+  return code.replace(/\b([2-9]\d{0,4})\b/g, (m, n, off, s) => {
+    // skip if part of _S[n] or _T[n]
+    const before = s.slice(Math.max(0, off - 3), off);
+    if (/_S\[$|_T\[$/.test(before) || before.endsWith("[")) return m;
+    const v = Number(n);
+    if (level >= 3) {
+      const a = (v ^ 0x3d) + 1;
+      return "(bit32.bxor(" + a + ",61)-1)";
+    }
+    return "(" + (v + 17) + "-17)";
+  });
+}
+
+function _ghJunk(level) {
+  if (level < 2) return "";
+  const lines = [];
+  for (let i = 0; i < (level >= 3 ? 4 : 2); i++) {
+    const n = 1000 + Math.floor(Math.random() * 8000);
+    lines.push("do local _j" + i + "=" + n + " if _j" + i + "==" + (n + 1) + " then return end end");
+  }
+  return lines.join("\n") + "\n";
+}
+
+function _ghWrapRuntime(body, strings, tInit, seed) {
+  const strTable = strings.map((s) => "{" + _ghXorStr(s, seed).join(",") + "}").join(",");
   return (
-    "-- GH basic (local)\n" +
-    "local _T={game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next}\n" +
+    "-- GH local obfuscate\n" +
+    "local _T={" + tInit + "}\n" +
     "local _S={}\n" +
-    "do local _d={" + strTable + "} " +
-    "for _i=1,#_d do local _b=_d[_i] local _o={} " +
-    "for _j=1,#_b do _o[_j]=string.char(bit32.bxor(_b[_j],(90+((_j-1)%13)))) end " +
+    "do local _d={" + strTable + "} local _k=" + seed + "\n" +
+    "for _i=1,#_d do local _b=_d[_i] local _o={} for _j=1,#_b do " +
+    "_o[_j]=string.char(bit32.bxor(_b[_j],bit32.band(_k+(_j-1)*7,255))) end " +
     "_S[_i]=table.concat(_o) end end\n" +
+    _ghJunk(strings.length > 0 ? 2 : 1) +
     body
   );
 }
 
-/** Local Basic: obfuscate code + Lua inside [====[ ]====]. No loadstring wrap of whole file. */
-function localBasicObfuscate(code) {
-  // First pass: only transform insides of long brackets that look like Lua
-  let step1 = "";
-  {
-    let i = 0;
-    while (i < code.length) {
-      if (code[i] === "[") {
-        let j = i + 1, n = 0;
-        while (code[j] === "=") { n++; j++; }
-        if (code[j] === "[") {
-          const openEnd = j + 1;
-          let k = openEnd, closeAt = -1;
-          while (k < code.length) {
-            if (code[k] === "]") {
-              let m = 0, p = k + 1;
-              while (code[p] === "=") { m++; p++; }
-              if (m === n && code[p] === "]") { closeAt = k; break; }
-            }
-            k++;
+function _ghObfuscateChunk(src, level) {
+  const seed = 0x5a + (level * 13);
+  const parsed = _ghParseStringsAndComments(src, {
+    encryptStrings: true,
+    stripComments: level >= 2,
+  });
+  let code = parsed.code;
+  const aliased = _ghAliasGlobals(code, level);
+  code = aliased.body;
+  code = _ghEncodeNumbers(code, level);
+  if (level >= 2) {
+    // minify-ish whitespace
+    code = code.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+  }
+  return _ghWrapRuntime(code, parsed.strings, aliased.tInit, seed);
+}
+
+function _ghProcessLongBrackets(code, level) {
+  let i = 0, out = "";
+  while (i < code.length) {
+    if (code[i] === "[") {
+      let j = i + 1, n = 0;
+      while (code[j] === "=") { n++; j++; }
+      if (code[j] === "[") {
+        const openEnd = j + 1;
+        let k = openEnd, closeAt = -1;
+        while (k < code.length) {
+          if (code[k] === "]") {
+            let m = 0, p = k + 1;
+            while (code[p] === "=") { m++; p++; }
+            if (m === n && code[p] === "]") { closeAt = k; break; }
           }
-          if (closeAt >= 0) {
-            const inner = code.slice(openEnd, closeAt);
-            const closeEnd = closeAt + 1 + n + 1;
-            const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
-            if (looksCode && inner.trim().length > 8) {
-              const r = encryptStringsAndAlias(inner);
-              const ob = wrapWithRuntime(r.body, r.strTable);
-              let eqs = n;
-              while (ob.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 12) eqs++;
-              step1 += "[" + "=".repeat(eqs) + "[" + ob + "]" + "=".repeat(eqs) + "]";
-            } else {
-              step1 += code.slice(i, closeEnd);
-            }
-            i = closeEnd;
-            continue;
+          k++;
+        }
+        if (closeAt >= 0) {
+          const inner = code.slice(openEnd, closeAt);
+          const closeEnd = closeAt + 1 + n + 1;
+          const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
+          if (looksCode && inner.trim().length > 8) {
+            const ob = _ghObfuscateChunk(inner, level);
+            let eqs = n;
+            while (ob.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 12) eqs++;
+            out += "[" + "=".repeat(eqs) + "[" + ob + "]" + "=".repeat(eqs) + "]";
+          } else {
+            out += code.slice(i, closeEnd);
           }
+          i = closeEnd;
+          continue;
         }
       }
-      step1 += code[i];
-      i++;
     }
+    out += code[i];
+    i++;
   }
+  return out;
+}
 
-  // Second pass: obfuscate ONLY plain segments (do not touch long-bracket contents)
-  let step2 = "";
-  let allStrings = [];
-  let stringOffset = 0;
-  {
-    let i = 0;
-    let plain = "";
-    function flushPlain() {
-      if (!plain) return;
-      const r = encryptStringsAndAlias(plain);
-      // remap _S indices to global offset
-      let body = r.body;
-      if (r.hasStrings) {
-        // rebuild with offset
-        const parts = [];
-        let sidx = 0;
-        // re-extract was already done; simpler: run encrypt again collecting into allStrings
-        const r2 = encryptStringsAndAlias(plain);
-        // Actually append strings to global and re-number
-        const localCount = (r.strTable.match(/\{/g) || []).length;
+/** level: 1 basic, 2 medium-local, 3 full-local */
+function localObfuscate(code, level) {
+  level = Math.max(1, Math.min(3, level || 1));
+  // 1) obfuscate lua inside long brackets
+  const step1 = _ghProcessLongBrackets(code, level);
+  // 2) obfuscate plain parts only (leave long brackets intact)
+  let i = 0, out = "";
+  while (i < step1.length) {
+    if (step1[i] === "[") {
+      let j = i + 1, n = 0;
+      while (step1[j] === "=") { n++; j++; }
+      if (step1[j] === "[") {
+        const openEnd = j + 1;
+        let k = openEnd, closeAt = -1;
+        while (k < step1.length) {
+          if (step1[k] === "]") {
+            let m = 0, p = k + 1;
+            while (step1[p] === "=") { m++; p++; }
+            if (m === n && step1[p] === "]") { closeAt = k; break; }
+          }
+          k++;
+        }
+        if (closeAt >= 0) {
+          out += step1.slice(i, closeAt + 1 + n + 1);
+          i = closeAt + 1 + n + 1;
+          continue;
+        }
       }
-      // simpler approach: just append encrypted plain with local header only once at end
-      step2 += "\0PLAIN:" + plain + "\0";
-      plain = "";
     }
-    // rewrite second pass more cleanly without the broken flush
-  }
-
-  // Cleaner second pass
-  step2 = "";
-  {
-    let i = 0;
+    let start = i;
     while (i < step1.length) {
       if (step1[i] === "[") {
         let j = i + 1, n = 0;
         while (step1[j] === "=") { n++; j++; }
-        if (step1[j] === "[") {
-          const openEnd = j + 1;
-          let k = openEnd, closeAt = -1;
-          while (k < step1.length) {
-            if (step1[k] === "]") {
-              let m = 0, p = k + 1;
-              while (step1[p] === "=") { m++; p++; }
-              if (m === n && step1[p] === "]") { closeAt = k; break; }
-            }
-            k++;
-          }
-          if (closeAt >= 0) {
-            // keep whole bracket as-is (already obfuscated if needed)
-            step2 += step1.slice(i, closeAt + 1 + n + 1);
-            i = closeAt + 1 + n + 1;
-            continue;
-          }
-        }
+        if (step1[j] === "[") break;
       }
-      // gather plain run
-      let start = i;
-      while (i < step1.length) {
-        if (step1[i] === "[") {
-          let j = i + 1, n = 0;
-          while (step1[j] === "=") { n++; j++; }
-          if (step1[j] === "[") break;
-        }
-        i++;
-      }
-      const plain = step1.slice(start, i);
-      if (plain) {
-        const r = encryptStringsAndAlias(plain);
-        // temporary markers with full wrap deferred
-        step2 += "<<<CHUNK_START>>>" + JSON.stringify(r) + "<<<CHUNK_END>>>";
-      }
+      i++;
     }
+    const plain = step1.slice(start, i);
+    if (plain.trim()) out += _ghObfuscateChunk(plain, level);
+    else out += plain;
   }
+  return out;
+}
 
-  // Merge chunks into one runtime + concatenated bodies
-  const chunkRe = /<<<CHUNK_START>>>([\s\S]*?)<<<CHUNK_END>>>/g;
-  let mergedBody = "";
-  let mergedTables = [];
-  let sOff = 0;
-  let result = "";
-  let last = 0;
-  let m;
-  while ((m = chunkRe.exec(step2)) !== null) {
-    result += step2.slice(last, m.index);
-    const r = JSON.parse(m[1]);
-    let body = r.body;
-    if (r.hasStrings && r.strTable) {
-      // shift _S[n] by sOff
-      body = body.replace(/_S\[(\d+)\]/g, (_, n) => "_S[" + (Number(n) + sOff) + "]");
-      const tables = r.strTable ? r.strTable.split("},{").length : 0;
-      // count entries
-      const count = (r.strTable.match(/\{/g) || []).length;
-      if (r.strTable) mergedTables.push(r.strTable);
-      sOff += count;
-    }
-    mergedBody += body;
-    last = m.index + m[0].length;
-  }
-  result += step2.slice(last);
-
-  // If we only had bracket content and no plain, still ok
-  const strTable = mergedTables.join(",");
-  // Place runtime at start of whole file, then result with mergedBody embedded... 
-  // result still has brackets; mergedBody is only plain pieces that were replaced by markers.
-  // Rebuild: result currently is step2 with markers replaced by nothing yet — we built `result` as outside + we need to inject body at marker positions.
-
-  // Redo merge properly
-  result = "";
-  last = 0;
-  sOff = 0;
-  mergedTables = [];
-  chunkRe.lastIndex = 0;
-  while ((m = chunkRe.exec(step2)) !== null) {
-    result += step2.slice(last, m.index);
-    const r = JSON.parse(m[1]);
-    let body = r.body;
-    if (r.hasStrings && r.strTable) {
-      body = body.replace(/_S\[(\d+)\]/g, (_, n) => "_S[" + (Number(n) + sOff) + "]");
-      const count = (r.strTable.match(/\{/g) || []).length;
-      mergedTables.push(r.strTable);
-      sOff += count;
-    } else if (r.strTable) {
-      // no strings but still
-    }
-    // always apply alias body
-    if (!r.hasStrings) {
-      // body still has aliases applied
-    }
-    result += body;
-    last = m.index + m[0].length;
-  }
-  result += step2.slice(last);
-
-  const finalTable = mergedTables.join(",");
-  // Always add one runtime header for outer plain aliases/strings
-  // Bracket-inners already have their own runtime inside the brackets
-  return wrapWithRuntime(result, finalTable);
+// backwards-compatible name
+function localBasicObfuscate(code) {
+  return localObfuscate(code, 1);
 }
 
 async function withTimeout(promise, ms) {
@@ -1105,16 +996,17 @@ function obfuscatePage(siteName) {
     "Obfuscator · " + siteName,
     `
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">Basic obfuscates code (and Lua inside [====[ ]). Does not wrap in loadstring. Medium/Full = API, fallback local.</p>
+<p class="muted">Basic/Medium/Full differ in strength. VM needs API (Virtualize). If API is rate-limited, local L2/L3 is used — not the same as Basic.</p>
 
 <label>Preset</label>
 <select id="preset">
-  <option value="basic" selected>Basic — table + strings (obfuscate code, incl. inside [====[ ])</option>
-  <option value="medium">Medium — API plugins</option>
-  <option value="full">Full — virtualize + plugins</option>
-  <option value="embed">Wrap only loadstring([====[ ])</option>
-  <option value="embed_bit32">Wrap bit32 + loadstring</option>
-  <option value="custom">Custom checkboxes</option>
+  <option value="basic" selected>Basic — local L1 (table + strings)</option>
+  <option value="medium">Medium — API or local L2</option>
+  <option value="full">Full — API Virtualize/VM or local L3</option>
+  <option value="vm">VM only — API Virtualize (fallback local L3)</option>
+  <option value="embed">Wrap loadstring([====[ ])</option>
+  <option value="embed_bit32">Wrap bit32+loadstring</option>
+  <option value="custom">Custom API plugins</option>
 </select>
 
 <div id="customBox" style="display:none;margin-top:10px">
@@ -1243,66 +1135,74 @@ export default {
           return json({ ok: false, error: "invalid JSON" }, 400);
         }
         const code = typeof body.code === "string" ? body.code : "";
-        const preset = body.preset || "medium";
+        const preset = body.preset || "basic";
         if (!code || code.length < 2) return json({ ok: false, error: "empty code" }, 400);
         if (code.length > 1_500_000) return json({ ok: false, error: "code too large" }, 413);
 
         const apiKey = env.LUAOBF_API_KEY || LUAOBF_FALLBACK;
 
+        // pure local embeds
         if (preset === "embed") {
           return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
         }
-        // Basic = local table + strings, obfuscate [====[ code ]====] inners. NO loadstring wrap.
-        if (preset === "basic") {
-          try {
-            const src = localBasicObfuscate(code);
-            return json({
-              ok: true,
-              code: src,
-              mode: "basic",
-              note: "local table+strings; long-bracket inners obfuscated",
-            });
-          } catch (e) {
-            return json({ ok: false, error: "local basic failed: " + String(e && e.message ? e.message : e) }, 500);
-          }
-        }
         if (preset === "embed_bit32") {
-          // try API light once; on 429 fall back to local
-          let src = code;
-          let note = "local";
-          const light = await callLuaObf(apiKey, code, presetConfig("light"));
-          if (light.ok) {
-            src = light.code;
-            note = "api light";
-          } else {
-            src = localBasicObfuscate(code);
-            note = "api fail -> local: " + (light.error || "");
-          }
-          return json({ ok: true, code: bit32Embed(src), mode: "embed_bit32", note });
+          return json({ ok: true, code: bit32Embed(code), mode: "embed_bit32" });
         }
 
-        // Medium / Full / Custom: try API once (8s). Any fail -> local basic. No spam needed.
-        const cfg = preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset);
+        // Basic = local level 1 only (fast, no API)
+        if (preset === "basic") {
+          try {
+            return json({
+              ok: true,
+              code: localObfuscate(code, 1),
+              mode: "basic",
+              note: "local L1 table+strings",
+            });
+          } catch (e) {
+            return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+          }
+        }
+
+        // medium / full / vm / custom → try API first
+        const cfg =
+          preset === "custom"
+            ? buildConfigFromOptions(body.options || {})
+            : presetConfig(preset === "vm" ? "full" : preset);
+
+        // ensure Virtualize flag for vm/full
+        if (preset === "full" || preset === "vm") {
+          cfg.Virtualize = true;
+        }
+
         try {
-          const result = await withTimeout(callLuaObf(apiKey, code, cfg), 8000);
+          const result = await withTimeout(callLuaObf(apiKey, code, cfg), 20000);
           if (result && result.ok && result.code) {
-            return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
+            return json({
+              ok: true,
+              code: result.code,
+              mode: preset,
+              sessionId: result.sessionId,
+              note: cfg.Virtualize ? "API + Virtualize" : "API",
+            });
           }
           const err = (result && result.error) || "api failed";
-          const src = localBasicObfuscate(code);
+          // local fallback with matching strength
+          const level = preset === "full" || preset === "vm" ? 3 : 2;
+          const src = localObfuscate(code, level);
           return json({
             ok: true,
             code: src,
-            mode: "basic_fallback",
-            note: "API unavailable (" + err + ") — local basic used",
+            mode: preset + "_local_L" + level,
+            note: "API fail (" + err + ") → local level " + level + (cfg.Virtualize ? " (VM not available offline)" : ""),
           });
         } catch (e) {
-          const src = localBasicObfuscate(code);
+          const level = preset === "full" || preset === "vm" ? 3 : 2;
+          const src = localObfuscate(code, level);
           return json({
             ok: true,
             code: src,
-            mode: "basic_fallback",
-            note: "API error/timeout — local basic used: " + String(e && e.message ? e.message : e),
+            mode: preset + "_local_L" + level,
+            note: "API timeout/error → local L" + level + ": " + String(e && e.message ? e.message : e),
           });
         }
       }
