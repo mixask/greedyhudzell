@@ -464,7 +464,8 @@ const PLUGIN_DEFS = [
 ];
 
 function presetConfig(preset) {
-  if (preset === "light") {
+  if (preset === "basic" || preset === "light") {
+    // table indirection + strings
     return { MinifiyAll: true, CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100] } };
   }
   if (preset === "full") {
@@ -590,11 +591,13 @@ function syntaxCheck(code) {
   const stack = [];
   let i = 0;
   let line = 1;
-  let inStr = null;
+  let inStr = null; // '"', "'", "long"
   let longEq = 0;
   while (i < code.length) {
     const c = code[i];
     if (c === "\n") line++;
+
+    // long strings [[ ]] and [=[ ]=]
     if (!inStr && c === "[" && code[i + 1] === "[") {
       inStr = "long";
       longEq = 0;
@@ -632,6 +635,49 @@ function syntaxCheck(code) {
       i++;
       continue;
     }
+
+    // comments: -- line OR --[[ long ]] OR --[=[ long ]=]
+    if (!inStr && c === "-" && code[i + 1] === "-") {
+      // long comment?
+      let j = i + 2;
+      if (code[j] === "[") {
+        let n = 0;
+        j++;
+        while (code[j] === "=") {
+          n++;
+          j++;
+        }
+        if (code[j] === "[") {
+          // skip until matching ]=...=]
+          j++;
+          while (j < code.length) {
+            if (code[j] === "\n") line++;
+            if (code[j] === "]") {
+              let k = j + 1;
+              let m = 0;
+              while (code[k] === "=") {
+                m++;
+                k++;
+              }
+              if (m === n && code[k] === "]") {
+                i = k + 1;
+                break;
+              }
+            }
+            j++;
+          }
+          if (j >= code.length) {
+            issues.push("unclosed long comment --[[");
+            break;
+          }
+          continue;
+        }
+      }
+      // line comment
+      while (i < code.length && code[i] !== "\n") i++;
+      continue;
+    }
+
     if (!inStr && (c === '"' || c === "'")) {
       inStr = c;
       i++;
@@ -646,10 +692,7 @@ function syntaxCheck(code) {
       i++;
       continue;
     }
-    if (c === "-" && code[i + 1] === "-") {
-      while (i < code.length && code[i] !== "\n") i++;
-      continue;
-    }
+
     if (pairs[c]) stack.push({ ch: c, line });
     else if (c === ")" || c === "]" || c === "}") {
       const top = stack.pop();
@@ -663,13 +706,6 @@ function syntaxCheck(code) {
 }
 
 function obfuscatePage(siteName) {
-  const pluginChecks = PLUGIN_DEFS.map(
-    (p) =>
-      `<label class="chk"><input type="checkbox" data-plugin="${p.key}" ${
-        p.key === "EncryptStrings" || p.key === "SwizzleLookups" ? "checked" : ""
-      }/> ${p.label}</label>`
-  ).join("");
-
   return pageShell(
     "Obfuscator · " + siteName,
     `
@@ -679,44 +715,42 @@ function obfuscatePage(siteName) {
   <a href="https://discord.gg/sbVuaT9a2T">Discord</a>
 </div>
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">Same dark theme as the key site. Powered by luaobfuscator.com API + local embed modes.</p>
+<p class="muted">One page. No tabs. luaobfuscator.com API + local bit32 embed.</p>
 
 <label>Preset</label>
 <select id="preset">
-  <option value="custom">Custom (checkboxes)</option>
-  <option value="light">Light — Swizzle + Strings</option>
-  <option value="medium" selected>Medium</option>
-  <option value="full">Full — Virtualize + plugins</option>
+  <option value="basic" selected>Basic — table indirection + strings + bit32</option>
+  <option value="medium">Medium — API plugins</option>
+  <option value="full">Full — virtualize + plugins</option>
   <option value="embed">Embed only [=====[ ]=====]</option>
-  <option value="embed_bit32">Embed + bit32 + light API</option>
+  <option value="custom">Custom checkboxes</option>
 </select>
 
-<label>Root</label>
-<label class="chk"><input type="checkbox" data-root="MinifiyAll" checked/> Minify All</label>
-<label class="chk"><input type="checkbox" data-root="Virtualize"/> Virtualize</label>
-<label class="chk"><input type="checkbox" data-root="Multifile"/> Multifile</label>
-
-<label>Plugins</label>
-<div class="plugins">${pluginChecks}</div>
-
-<div class="grid" style="margin-top:16px">
-  <div>
-    <label>Input</label>
-    <textarea id="input" placeholder="paste Lua..."></textarea>
-    <div class="actions">
-      <button id="run">Obfuscate</button>
-      <button class="secondary" id="checkIn">Syntax (in)</button>
-    </div>
-  </div>
-  <div>
-    <label>Output</label>
-    <textarea id="output" placeholder="result..."></textarea>
-    <div class="actions">
-      <button class="secondary" id="copy">Copy</button>
-      <button class="secondary" id="checkOut">Syntax (out)</button>
-    </div>
+<div id="customBox" style="display:none;margin-top:10px">
+  <label>Root</label>
+  <label class="chk"><input type="checkbox" data-root="MinifiyAll" checked/> Minify All</label>
+  <label class="chk"><input type="checkbox" data-root="Virtualize"/> Virtualize</label>
+  <label class="chk"><input type="checkbox" data-root="Multifile"/> Multifile</label>
+  <label>Plugins</label>
+  <div class="plugins">
+    <label class="chk"><input type="checkbox" data-plugin="EncryptStrings" checked/> Encrypt Strings</label>
+    <label class="chk"><input type="checkbox" data-plugin="SwizzleLookups" checked/> Table indirection</label>
+    <label class="chk"><input type="checkbox" data-plugin="EncryptFuncDeclaration"/> Encrypt Func Declaration</label>
+    <label class="chk"><input type="checkbox" data-plugin="ControlFlowFlattenV1AllBlocks"/> Control Flow Flatten</label>
+    <label class="chk"><input type="checkbox" data-plugin="JunkifyAllIfStatements"/> Junkify Ifs</label>
   </div>
 </div>
+
+<label style="margin-top:14px">Input Lua</label>
+<textarea id="input" placeholder="paste Lua..." style="min-height:220px"></textarea>
+<div class="actions">
+  <button id="run">Obfuscate</button>
+  <button class="secondary" id="checkIn">Syntax check</button>
+  <button class="secondary" id="copy">Copy output</button>
+</div>
+
+<label style="margin-top:14px">Output</label>
+<textarea id="output" placeholder="result..." style="min-height:220px"></textarea>
 <p id="status" class="muted"></p>
 
 <script>
@@ -724,34 +758,42 @@ const statusEl=document.getElementById('status');
 const input=document.getElementById('input');
 const output=document.getElementById('output');
 const preset=document.getElementById('preset');
+const customBox=document.getElementById('customBox');
 const runBtn=document.getElementById('run');
+preset.onchange=()=>{ customBox.style.display = preset.value==='custom' ? 'block' : 'none'; };
 function collectOptions(){
   const opts={};
   document.querySelectorAll('[data-root]').forEach(el=>opts[el.getAttribute('data-root')]=el.checked);
   document.querySelectorAll('[data-plugin]').forEach(el=>opts[el.getAttribute('data-plugin')]=el.checked);
   return opts;
 }
-async function doCheck(which){
-  const code=which==='in'?input.value:output.value;
+async function doCheck(){
   statusEl.textContent='Checking...';
   try{
-    const res=await fetch('/api/syntax-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:code||''})});
+    const res=await fetch('/api/syntax-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:input.value||''})});
     const data=await res.json();
-    statusEl.innerHTML=data.ok?'<span class="ok">Syntax OK (structural)</span>':'<span class="error">'+(data.issues||[]).join('<br>')+'</span>';
-  }catch(e){statusEl.textContent=String(e)}
+    statusEl.innerHTML=data.ok?'<span class="ok">Syntax OK</span>':'<span class="error">'+(data.issues||[]).join('<br>')+'</span>';
+  }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
 }
-document.getElementById('checkIn').onclick=()=>doCheck('in');
-document.getElementById('checkOut').onclick=()=>doCheck('out');
+document.getElementById('checkIn').onclick=()=>doCheck();
 runBtn.onclick=async()=>{
   const code=input.value||'';
   if(!code.trim()){statusEl.textContent='Paste code first';return}
   runBtn.disabled=true;statusEl.textContent='Obfuscating...';output.value='';
   try{
     const res=await fetch('/api/obfuscate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({preset:preset.value,options:collectOptions(),code})});
-    const data=await res.json();
-    if(!data.ok){statusEl.innerHTML='<span class="error">'+(data.error||'failed')+'</span>'}
-    else{output.value=data.code||'';statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>'}
-  }catch(e){statusEl.textContent=String(e)}
+    let data;
+    try{ data=await res.json(); }catch(_){
+      statusEl.innerHTML='<span class="error">Bad response HTTP '+res.status+'</span>';
+      runBtn.disabled=false;return;
+    }
+    if(!data.ok){
+      statusEl.innerHTML='<span class="error">'+(data.error||'failed')+(data.hint?('<br>'+data.hint):'')+'</span>';
+    } else {
+      output.value=data.code||'';
+      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars'+(data.note?(' · '+data.note):'')+'</span>';
+    }
+  }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
   runBtn.disabled=false;
 };
 document.getElementById('copy').onclick=async()=>{
@@ -771,28 +813,7 @@ export default {
       }
 
       const url = new URL(request.url);
-      let path = url.pathname;
-      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-
-      // ========== KEY API (must be before any HTML) ==========
-      if (request.method === "POST" && path === "/validate") {
-        return await handleValidate(request, env);
-      }
-      if (request.method === "GET" && path.startsWith("/get-key/token/")) {
-        const token = decodeURIComponent(path.slice("/get-key/token/".length));
-        return await handleGetKeyToken(request, env, token);
-      }
-      if (request.method === "GET" && path === "/step2") {
-        return await handleStep2(request, env);
-      }
-      if (request.method === "GET" && path === "/finish") {
-        return await handleFinish(request, env, url.searchParams.get("token"));
-      }
-      if (request.method === "POST" && path === "/generate-key") {
-        return await handleGenerateKey(request, env);
-      }
-
-
+      const path = url.pathname;
 
       // --- Lua proxies (mixask/GH) ---
       if (path === "/loader.lua") return proxyGithub("greedyloader.lua");
@@ -840,22 +861,41 @@ export default {
         if (preset === "embed") {
           return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
         }
-        if (preset === "embed_bit32") {
+        // Basic = table indirection + strings (+ optional bit32 wrap)
+        if (preset === "basic" || preset === "embed_bit32") {
           let src = code;
-          const light = await callLuaObf(apiKey, code, presetConfig("light"));
-          if (light.ok) src = light.code;
+          let note = "";
+          const light = await callLuaObf(apiKey, code, presetConfig("basic"));
+          if (light.ok) {
+            src = light.code;
+            note = "swizzle+strings ok";
+          } else {
+            note = "api failed, bit32-only: " + (light.error || "unknown");
+            // still return bit32 of original so UI is not empty "error"
+          }
           return json({
             ok: true,
             code: bit32Embed(src),
-            mode: "embed_bit32",
-            note: light.ok ? "api light + bit32 embed" : "bit32 only: " + (light.error || ""),
+            mode: preset === "basic" ? "basic" : "embed_bit32",
+            note,
+            api_ok: !!light.ok,
           });
         }
 
         const cfg = preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset);
-        const result = await callLuaObf(apiKey, code, cfg);
-        if (!result.ok) return json(result, 502);
-        return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
+        try {
+          const result = await callLuaObf(apiKey, code, cfg);
+          if (!result.ok) {
+            return json({
+              ok: false,
+              error: result.error || "obfuscate failed",
+              hint: "If this persists, try preset Basic or Embed. API may be rate-limited.",
+            }, 502);
+          }
+          return json({ ok: true, code: result.code, mode: preset, sessionId: result.sessionId });
+        } catch (e) {
+          return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
+        }
       }
 
       // --- HOME ---
@@ -873,7 +913,17 @@ export default {
         );
       }
 
-
+      // --- KEY SYSTEM ---
+      if (request.method === "GET" && path.startsWith("/get-key/token/")) {
+        const token = decodeURIComponent(path.slice("/get-key/token/".length));
+        return await handleGetKeyToken(request, env, token);
+      }
+      if (request.method === "GET" && path === "/step2") return await handleStep2(request, env);
+      if (request.method === "GET" && path === "/finish") {
+        return await handleFinish(request, env, url.searchParams.get("token"));
+      }
+      if (request.method === "POST" && path === "/generate-key") return await handleGenerateKey(request, env);
+      if (request.method === "POST" && path === "/validate") return await handleValidate(request, env);
 
       const adminMatch = path.match(/^\/keys\/([^/]+)\/encrypted\/get-keys-all$/);
       if (request.method === "GET" && adminMatch) return await handleAdminKeys(request, env, adminMatch[1]);
