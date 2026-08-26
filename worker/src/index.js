@@ -1182,6 +1182,284 @@ document.getElementById('copy').onclick=async()=>{
 `
   );
 }
+
+/* ===================== SITE PAGES (black/gold nav) ===================== */
+const DISCORD_INVITE = "https://discord.gg/sbVuaT9a2T";
+const FREE_KEY_LINK = "https://work.ink/28wp/Greedy-hudzell";
+const WEAO_URL = "https://weao.xyz/api/status/exploits";
+
+function siteNav(active) {
+  const items = [
+    ["/home", "Home"],
+    ["/pricing", "Pricing"],
+    ["/status", "Status"],
+    ["/executors", "Executors"],
+    ["/guide", "Guide"],
+    ["/tos", "ToS"],
+    ["/obfuscator", "Obfuscator"],
+  ];
+  return items
+    .map(([href, label]) => {
+      const on = active === label.toLowerCase();
+      return `<a href="${href}" style="padding:6px 12px;border-radius:999px;border:1px solid ${on ? "#C9A227" : "#333"};background:${on ? "#C9A227" : "transparent"};color:${on ? "#0a0a0a" : "#aaa"};text-decoration:none;font-size:12px;font-weight:600">${label}</a>`;
+    })
+    .join(" ");
+}
+
+function siteShell(title, active, bodyHtml, wide = false) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title} · Greedy Hudzell</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;background:#0a0a0a;color:#f2f2f2;font-family:Inter,Arial,sans-serif;line-height:1.55;
+background-image:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(201,162,39,.08),transparent)}
+a{color:#E8C547}
+.top{position:sticky;top:0;z-index:20;backdrop-filter:blur(12px);background:rgba(10,10,10,.85);border-bottom:1px solid #2a2a2a}
+.top-inner{max-width:1100px;margin:0 auto;padding:12px 16px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
+.brand{color:#fff;text-decoration:none;font-weight:800;letter-spacing:.5px}
+.nav{display:flex;flex-wrap:wrap;gap:6px}
+.wrap{max-width:${wide ? "1100px" : "820px"};margin:0 auto;padding:28px 16px 70px}
+h1{font-size:1.75rem;margin:8px 0 6px}
+.sub{color:#9a9a9a;font-size:14px;margin-bottom:18px}
+.badge{display:inline-block;font-size:11px;font-weight:700;color:#C9A227;border:1px solid rgba(201,162,39,.3);background:rgba(201,162,39,.1);padding:2px 8px;border-radius:999px;margin-bottom:10px}
+.card{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:18px;margin:12px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:720px){.grid2{grid-template-columns:1fr}}
+label.f{display:block;color:#9a9a9a;font-size:12px;margin:10px 0 6px;font-weight:600}
+input,select,textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #333;background:#080808;color:#fff}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border-radius:999px;border:1px solid #333;background:#181818;color:#fff;font-weight:700;cursor:pointer;text-decoration:none;font-size:13px}
+.btn-gold{background:linear-gradient(135deg,#C9A227,#a8841a);color:#0a0a0a;border-color:#C9A227}
+.muted{color:#9a9a9a;font-size:13px}
+.ok{color:#6dff9a}.err{color:#ff6d6d}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #2a2a2a}
+th{color:#9a9a9a;font-size:11px;text-transform:uppercase}
+.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:900px){.price-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:520px){.price-grid{grid-template-columns:1fr}}
+.pcard{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px;position:relative}
+.pcard.feat{border-color:#C9A227}
+.pcard .amt{font-size:1.6rem;font-weight:800;color:#E8C547}
+.pcard ul{list-style:none;padding:0;margin:6px 0;flex:1}
+.pcard li{font-size:13px;color:#ccc;padding:3px 0}
+.foot{margin-top:28px;text-align:center;color:#555;font-size:12px}
+.hero-actions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-inner">
+  <a class="brand" href="/home">GREEDY HUDZELL</a>
+  <nav class="nav">${siteNav(active)}</nav>
+</div></header>
+<main class="wrap">
+${bodyHtml}
+<div class="foot">© Greedy Hudzell · <a href="${DISCORD_INVITE}">Discord</a> · Not affiliated with Roblox</div>
+</main>
+</body></html>`;
+}
+
+function fmtSunc(v) {
+  if (v == null || v === "") return "—";
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "string") return String(v);
+  if (typeof v === "object") {
+    if (v.percentage != null) return String(v.percentage) + (String(v.percentage).includes("%") ? "" : "%");
+    if (v.percent != null) return String(v.percent) + "%";
+    if (v.sUNC != null) return fmtSunc(v.sUNC);
+    if (v.sunc != null) return fmtSunc(v.sunc);
+    if (v.score != null) return String(v.score);
+    try {
+      return JSON.stringify(v);
+    } catch {
+      return "—";
+    }
+  }
+  return String(v);
+}
+
+function homePage() {
+  return siteShell("Home", "home", `
+  <div class="badge">Official</div>
+  <h1>Greedy Hudzell</h1>
+  <p class="sub">Keys, loader, updates. Check your key status below.</p>
+  <div class="hero-actions">
+    <a class="btn btn-gold" href="${FREE_KEY_LINK}" target="_blank" rel="noopener">Get free key</a>
+    <a class="btn" href="/pricing">Pricing</a>
+    <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Discord</a>
+  </div>
+  <div class="grid2">
+    <div class="card">
+      <h3 style="margin-bottom:8px">Key status</h3>
+      <label class="f">Key</label>
+      <input id="k_key" placeholder="GH-XXXX-XXXX-XXXX" autocomplete="off"/>
+      <label class="f">Roblox username</label>
+      <input id="k_user" placeholder="Not display name" autocomplete="off"/>
+      <button class="btn btn-gold" style="margin-top:12px;width:100%" id="k_btn" type="button">Check key</button>
+      <p id="k_out" class="muted" style="margin-top:12px;white-space:pre-wrap"></p>
+    </div>
+    <div class="card">
+      <h3 style="margin-bottom:8px">Loader</h3>
+      <p class="muted" style="word-break:break-all"><code>loadstring(game:HttpGet("https://greedyhudzell.xyz/loader.lua"))()</code></p>
+      <p class="muted" style="margin-top:12px"><a href="/guide">Guide</a> · <a href="/executors">Executors</a> · <a href="/status">Status</a></p>
+    </div>
+  </div>
+<script>
+(function(){
+  const out=document.getElementById('k_out');
+  const btn=document.getElementById('k_btn');
+  btn.onclick=async function(){
+    const key=(document.getElementById('k_key').value||'').trim();
+    const username=(document.getElementById('k_user').value||'').trim();
+    if(!key||!username){out.className='err';out.textContent='Enter key and username.';return;}
+    out.className='muted';out.textContent='Checking...';btn.disabled=true;
+    try{
+      const res=await fetch('/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({key,username})});
+      const data=await res.json();
+      if(data.valid===true){
+        out.className='ok';
+        const exp=data.expires_at?new Date(Number(data.expires_at)*1000).toUTCString():'n/a';
+        out.textContent='VALID\\nPlan: '+(data.plan||'n/a')+'\\nExpires: '+exp;
+      }else{out.className='err';out.textContent='INVALID — '+(data.reason||res.status);}
+    }catch(e){out.className='err';out.textContent=String(e);}
+    btn.disabled=false;
+  };
+})();
+</script>
+`, true);
+}
+
+function statusPage() {
+  return siteShell("Status", "status", `
+  <div class="badge">Ops</div>
+  <h1>Status</h1>
+  <p class="sub">Public endpoints. For live incidents use Discord status channel.</p>
+  <div class="card">
+    <table>
+      <tr><th>Component</th><th>Note</th></tr>
+      <tr><td>Website</td><td>Online</td></tr>
+      <tr><td>/validate</td><td>Key API</td></tr>
+      <tr><td>/loader.lua</td><td>GitHub proxy</td></tr>
+      <tr><td>Work.ink free keys</td><td>Third-party flow</td></tr>
+      <tr><td>Discord bot</td><td>Keys / verify / updates</td></tr>
+    </table>
+  </div>
+`);
+}
+
+function executorsPage() {
+  // Client-side fetch + safe sUNC formatting
+  return siteShell("Executors", "executors", `
+  <div class="badge">Compatibility</div>
+  <h1>Executors</h1>
+  <p class="sub">Best-effort list. Prefer tools with HTTP, files, and queue_on_teleport.</p>
+  <div class="card muted" id="ex_out">Loading…</div>
+<script>
+function fmtSunc(v){
+  if(v==null||v==="")return "—";
+  if(typeof v==="number"||typeof v==="boolean"||typeof v==="string")return String(v);
+  if(typeof v==="object"){
+    if(v.percentage!=null)return String(v.percentage)+(String(v.percentage).includes("%")?"":"%");
+    if(v.percent!=null)return String(v.percent)+"%";
+    if(v.sUNC!=null)return fmtSunc(v.sUNC);
+    if(v.sunc!=null)return fmtSunc(v.sunc);
+    if(v.score!=null)return String(v.score);
+    if(v.version!=null&&v.updateStatus!=null)return String(v.updateStatus);
+    try{return JSON.stringify(v);}catch(e){return "—";}
+  }
+  return String(v);
+}
+function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+(async function(){
+  const el=document.getElementById("ex_out");
+  try{
+    const res=await fetch(${JSON.stringify(WEAO_URL)},{headers:{Accept:"application/json"}});
+    if(!res.ok)throw new Error("HTTP "+res.status);
+    const data=await res.json();
+    const list=Array.isArray(data)?data:(data.exploits||data.data||data.results||[]);
+    if(!list.length){el.textContent="Empty list from weao.xyz";return;}
+    const rows=list.slice(0,50).map(function(x){
+      const name=x.name||x.title||x.executor||"?";
+      const st=x.updateStatus!=null?x.updateStatus:(x.status!=null?x.status:(x.updated!=null?x.updated:""));
+      const sunc=fmtSunc(x.sunc!=null?x.sunc:(x.sUNC!=null?x.sUNC:(x.percentage!=null?x.percentage:x.unc)));
+      return "<tr><td>"+esc(name)+"</td><td>"+esc(st)+"</td><td>"+esc(sunc)+"</td></tr>";
+    }).join("");
+    el.className="card";
+    el.innerHTML="<table><thead><tr><th>Executor</th><th>Status</th><th>sUNC / info</th></tr></thead><tbody>"+rows+"</tbody></table>";
+  }catch(e){
+    el.textContent="Could not load weao.xyz ("+e+"). Use Discord recommendations.";
+  }
+})();
+</script>
+`);
+}
+
+function guidePage() {
+  return siteShell("Guide", "guide", `
+  <div class="badge">Docs</div>
+  <h1>Guide</h1>
+  <p class="sub">Free key → loader → hub.</p>
+  <div class="card">
+    <p><b>1.</b> Get a key (free Work.ink or paid on Discord).</p>
+    <p style="margin-top:8px"><b>2.</b> Run: <code>loadstring(game:HttpGet("https://greedyhudzell.xyz/loader.lua"))()</code></p>
+    <p style="margin-top:8px"><b>3.</b> Enter key. Check status anytime on <a href="/home">Home</a>.</p>
+    <p style="margin-top:8px"><b>4.</b> Stack overflow after obfuscation → use light/raw, not Full/VM.</p>
+  </div>
+`);
+}
+
+function pricingPage() {
+  return siteShell("Pricing", "pricing", `
+  <div class="badge">USD</div>
+  <h1>Pricing</h1>
+  <p class="sub">Paid plans include account rewire. Free does not.</p>
+  <div class="price-grid">
+    <div class="pcard"><h3>Free</h3><div class="amt">$0 <span class="muted">/24h</span></div>
+      <ul><li>Full access</li><li>1 username</li><li>No rewire</li></ul>
+      <a class="btn" href="${FREE_KEY_LINK}" target="_blank" rel="noopener">Get free key</a></div>
+    <div class="pcard"><h3>Week</h3><div class="amt">$3.99</div>
+      <ul><li>7 days</li><li>Rewire</li></ul>
+      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+    <div class="pcard feat"><h3>Month</h3><div class="amt">$6.99</div>
+      <ul><li>30 days</li><li>Rewire</li><li>Popular</li></ul>
+      <a class="btn btn-gold" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+    <div class="pcard"><h3>Year</h3><div class="amt">$12.99</div>
+      <ul><li>365 days</li><li>Rewire</li></ul>
+      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+  </div>
+`, true);
+}
+
+function tosPage() {
+  return siteShell("ToS", "tos", `
+  <div class="badge">Legal</div>
+  <h1>Terms of Service</h1>
+  <p class="sub">August 2026</p>
+  <div class="card muted">
+    <p>Free = 24h, one username, no rewire. Paid (Week $3.99 / Month $6.99 / Year $12.99) includes fair-use rewire.</p>
+    <p style="margin-top:8px">No resale of keys. Sales final after key delivery. Not affiliated with Roblox. Use at your own risk.</p>
+    <p style="margin-top:8px"><a href="${DISCORD_INVITE}">Discord</a></p>
+  </div>
+`);
+}
+
+
+/* ROUTER: replace the HOME block and add pages. Example:
+
+  // / → /home
+  if (request.method === "GET" && (path === "/" || path === "")) {
+    return Response.redirect(new URL("/home", url).toString(), 302);
+  }
+  if (request.method === "GET" && path === "/home") return html(homePage());
+  if (request.method === "GET" && path === "/status") return html(statusPage());
+  if (request.method === "GET" && path === "/executors") return html(executorsPage());
+  if (request.method === "GET" && path === "/guide") return html(guidePage());
+  if (request.method === "GET" && path === "/pricing") return html(pricingPage());
+  if (request.method === "GET" && path === "/tos") return html(tosPage());
+
+*/
 /* ===================== ROUTER ===================== */
 export default {
   async fetch(request, env) {
