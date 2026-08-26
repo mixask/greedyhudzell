@@ -11,8 +11,8 @@
 import {
   createStripeCheckout,
   handleStripeWebhook,
- from "./stripe.js";
-};
+} from "./stripe.js";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
