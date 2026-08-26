@@ -1,40 +1,43 @@
 /**
  * greedyhudzell.xyz — unified Worker
- * - Key system (Work.ink + D1) — unchanged logic
- * - Lua proxies: /loader.lua /script.lua /library.lua /modules.lua
- * - Obfuscator: GET /obfuscate , POST /api/obfuscate , POST /api/syntax-check
+ * - Key system (Work.ink + D1)
+ * - Admin: generate / renew / revoke / key
+ * - Lua proxies + Obfuscator
  *
  * Bindings: DB (D1)
  * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional)
  * Vars: SITE_NAME
  */
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
-
 const SESSION_TTL = 30 * 60;
 const KEY_TTL = 24 * 60 * 60;
-
+const PLAN_TTL = {
+  day: 24 * 60 * 60,
+  week: 7 * 24 * 60 * 60,
+  month: 30 * 24 * 60 * 60,
+  year: 365 * 24 * 60 * 60,
+};
+function planTtl(plan) {
+  return PLAN_TTL[plan] || PLAN_TTL.day;
+}
 const GH = "https://raw.githubusercontent.com/mixask/GH/main";
 const LUAOBF_NEW = "https://luaobfuscator.com/api/obfuscator/newscript";
 const LUAOBF_RUN = "https://luaobfuscator.com/api/obfuscator/obfuscate";
 const LUAOBF_FALLBACK = "11ad3847-d943-4a76-ee19-f9acab3e85144ea9";
-
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
   "Cache-Control": "no-store",
 };
-
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { ...jsonHeaders, ...corsHeaders, ...extraHeaders },
   });
 }
-
 function html(body, status = 200, extraHeaders = {}) {
   return new Response(body, {
     status,
@@ -45,7 +48,6 @@ function html(body, status = 200, extraHeaders = {}) {
     },
   });
 }
-
 function plain(body, status = 200) {
   return new Response(body, {
     status,
@@ -56,11 +58,9 @@ function plain(body, status = 200) {
     },
   });
 }
-
 function now() {
   return Math.floor(Date.now() / 1000);
 }
-
 function getClientIP(request) {
   return (
     request.headers.get("CF-Connecting-IP") ||
@@ -68,19 +68,16 @@ function getClientIP(request) {
     ""
   );
 }
-
 async function sha256(value) {
   const data = new TextEncoder().encode(value);
   const hash = await crypto.subtle.digest("SHA-256", data);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
 function randomString(length = 32) {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
 function generateKey() {
   const bytes = new Uint8Array(12);
   crypto.getRandomValues(bytes);
@@ -89,11 +86,9 @@ function generateKey() {
   for (const byte of bytes) value += alphabet[byte % alphabet.length];
   return `GH-${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;
 }
-
 function cookie(name, value, maxAge) {
   return `${name}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
 }
-
 function getCookie(request, name) {
   const cookies = request.headers.get("Cookie") || "";
   for (const part of cookies.split(";")) {
@@ -102,7 +97,6 @@ function getCookie(request, name) {
   }
   return null;
 }
-
 /* ===================== WORK.INK ===================== */
 async function validateWorkInkToken(token) {
   if (!token || token.length > 500) return { valid: false, reason: "missing_token" };
@@ -121,7 +115,6 @@ async function validateWorkInkToken(token) {
     return { valid: false, reason: "workink_request_failed" };
   }
 }
-
 /* ===================== DB / SESSION ===================== */
 async function createSession(env, ipHash) {
   const timestamp = now();
@@ -134,7 +127,6 @@ async function createSession(env, ipHash) {
     .run();
   return sessionId;
 }
-
 async function getSession(env, sessionId) {
   if (!sessionId) return null;
   return (
@@ -142,7 +134,6 @@ async function getSession(env, sessionId) {
     null
   );
 }
-
 async function validSession(env, sessionId, ipHash) {
   const session = await getSession(env, sessionId);
   if (!session) return { valid: false, reason: "session_not_found" };
@@ -150,8 +141,7 @@ async function validSession(env, sessionId, ipHash) {
   if (session.ip_hash !== ipHash) return { valid: false, reason: "ip_mismatch" };
   return { valid: true, session };
 }
-
-/* ===================== HTML SHELL (shared theme) ===================== */
+/* ===================== HTML SHELL ===================== */
 function pageShell(title, content) {
   return `<!doctype html>
 <html lang="en">
@@ -194,7 +184,6 @@ ${content}
 </body>
 </html>`;
 }
-
 /* ===================== KEY FLOW ===================== */
 async function handleGetKeyToken(request, env, token) {
   const work = await validateWorkInkToken(token);
@@ -226,7 +215,6 @@ async function handleGetKeyToken(request, env, token) {
     { "Set-Cookie": cookie("GH_SESSION", sessionId, SESSION_TTL) }
   );
 }
-
 async function handleStep2(request, env) {
   const sessionId = getCookie(request, "GH_SESSION");
   const currentIP = getClientIP(request);
@@ -249,7 +237,6 @@ async function handleStep2(request, env) {
     )
   );
 }
-
 async function handleFinish(request, env, token) {
   const sessionId = getCookie(request, "GH_SESSION");
   const currentIP = getClientIP(request);
@@ -300,7 +287,6 @@ async function handleFinish(request, env, token) {
     )
   );
 }
-
 async function handleGenerateKey(request, env) {
   const sessionId = getCookie(request, "GH_SESSION");
   const currentIP = getClientIP(request);
@@ -326,14 +312,13 @@ async function handleGenerateKey(request, env) {
   const key = generateKey();
   const timestamp = now();
   await env.DB.prepare(
-    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution)
-     VALUES (?, ?, ?, ?, ?, 0, 0, NULL)`
+    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
+     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
   )
-    .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL)
+    .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL, "day")
     .run();
   return json({ success: true, key, expires_at: timestamp + KEY_TTL });
 }
-
 async function handleValidate(request, env) {
   if (request.method !== "POST") return json({ valid: false, reason: "method_not_allowed" }, 405);
   let body;
@@ -345,30 +330,32 @@ async function handleValidate(request, env) {
   const key = typeof body.key === "string" ? body.key.trim() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
   if (!key || !username) return json({ valid: false, reason: "missing_key_or_username" });
-
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
   if (!record) return json({ valid: false, reason: "invalid_key" });
   if (record.revoked === 1) return json({ valid: false, reason: "revoked" });
   if (record.expires_at <= now()) return json({ valid: false, reason: "expired" });
-  if (record.username !== username) return json({ valid: false, reason: "username_mismatch" });
-
+  if (record.username !== username) {
+    const isPending = String(record.username || "").startsWith("pending_");
+    if (isPending) {
+      await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+    } else {
+      return json({ valid: false, reason: "username_mismatch" });
+    }
+  }
   const timestamp = now();
   await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`).bind(timestamp, key).run();
-
-  // Additive for Lua loader: real unix expiry (KEY_TTL from D1)
   return json({
     valid: true,
     expires_at: record.expires_at,
+    plan: record.plan || "day",
   });
 }
-
 /* ===================== ADMIN ===================== */
 function adminAuthorized(request, env) {
   const auth = request.headers.get("Authorization");
   if (!auth || !auth.startsWith("Bearer ")) return false;
   return auth.slice(7) === env.ADMIN_SECRET;
 }
-
 async function createRotationToken(env) {
   const interval = Math.floor(Date.now() / 1000 / 600);
   const key = await crypto.subtle.importKey(
@@ -381,7 +368,6 @@ async function createRotationToken(env) {
   const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(String(interval)));
   return [...new Uint8Array(signature)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
 async function handleAdminKeys(request, env, rotation) {
   if (!adminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
   const expectedRotation = await createRotationToken(env);
@@ -402,6 +388,7 @@ async function handleAdminKeys(request, env, rotation) {
     keys: result.results.map((k) => ({
       key: k.key,
       username: k.username,
+      plan: k.plan || "day",
       executed: k.executed === 1,
       last_execution: k.last_execution,
       created_at: k.created_at,
@@ -411,7 +398,6 @@ async function handleAdminKeys(request, env, rotation) {
     })),
   });
 }
-
 async function handleAdminRevoke(request, env) {
   if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
   let body;
@@ -426,7 +412,6 @@ async function handleAdminRevoke(request, env) {
   if (!result.meta.changes) return json({ success: false, reason: "key_not_found" }, 404);
   return json({ success: true });
 }
-
 async function handleAdminKey(request, env, key) {
   if (!adminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
@@ -434,6 +419,7 @@ async function handleAdminKey(request, env, key) {
   return json({
     key: record.key,
     username: record.username,
+    plan: record.plan || "day",
     session_id: record.session_id,
     created_at: record.created_at,
     expires_at: record.expires_at,
@@ -443,20 +429,86 @@ async function handleAdminKey(request, env, key) {
     status: record.revoked === 1 ? "REVOKED" : record.expires_at <= now() ? "EXPIRED" : "ACTIVE",
   });
 }
+/** Discord bot / admin panel: create key with plan week|month|year|day */
+async function handleAdminGenerate(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const plan = typeof body.plan === "string" ? body.plan.trim().toLowerCase() : "month";
+  if (!PLAN_TTL[plan]) return json({ success: false, reason: "invalid_plan", allowed: Object.keys(PLAN_TTL) }, 400);
 
+  let username = typeof body.username === "string" ? body.username.trim() : "";
+  if (username) {
+    if (username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
+      return json({ success: false, reason: "invalid_username" }, 400);
+    }
+  }
+
+  const key = generateKey();
+  const timestamp = now();
+  const expires = timestamp + planTtl(plan);
+  const storedUser = username || ("pending_" + key.replace(/-/g, "").slice(0, 12));
+
+  await env.DB.prepare(
+    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
+     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+  )
+    .bind(key, storedUser, "admin:" + timestamp, timestamp, expires, plan)
+    .run();
+
+  return json({
+    success: true,
+    key,
+    plan,
+    expires_at: expires,
+    username: username || null,
+    pending: !username,
+  });
+}
+/** Extend key by N days (un-revokes) */
+async function handleAdminRenew(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const days = Math.max(1, Math.min(365, Number(body.days) || 0));
+  if (!key || !days) return json({ success: false, reason: "missing_key_or_days" }, 400);
+
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ success: false, reason: "key_not_found" }, 404);
+
+  const base = Math.max(Number(record.expires_at) || 0, now());
+  const expires = base + days * 24 * 60 * 60;
+
+  await env.DB.prepare(`UPDATE keys SET expires_at = ?, revoked = 0 WHERE key = ?`).bind(expires, key).run();
+
+  return json({
+    success: true,
+    key,
+    expires_at: expires,
+    username: record.username,
+    plan: record.plan || "day",
+  });
+}
 /* ===================== LUA PROXY ===================== */
 async function proxyGithub(file) {
   const response = await fetch(`${GH}/${file}`, { cf: { cacheTtl: 0, cacheEverything: false } });
   if (!response.ok) return plain(`${file} not found`, 404);
   return plain(await response.text(), 200);
 }
-
-/* ===================== OBFUSCATOR ===================== */
+/* ===================== OBFUSCATOR (same as before) ===================== */
 const PLUGIN_DEFS = [
-  // From luaobfuscator Discord / forum docs — values are percentage args
   { key: "EncryptStrings", label: "Encrypt Strings", args: [100] },
-  { key: "SwizzleLookups", label: "Swizzle Lookups (foo.bar → foo[\"bar\"])", args: [100] },
-  { key: "TableIndirection", label: "Table Indirection (locals → table)", args: [100] },
+  { key: "SwizzleLookups", label: "Swizzle Lookups", args: [100] },
+  { key: "TableIndirection", label: "Table Indirection", args: [100] },
   { key: "EncryptFuncDeclaration", label: "Encrypt Func Declaration", args: [] },
   { key: "ControlFlowFlattenV1AllBlocks", label: "Control Flow Flatten V1", args: [75] },
   { key: "ControlFlowFlattenAllBlocks", label: "Control Flow Flatten (alt)", args: [75] },
@@ -466,18 +518,12 @@ const PLUGIN_DEFS = [
   { key: "MutateAllLiterals", label: "Mutate Literals", args: [50] },
   { key: "DummyFunctionArgs", label: "Dummy Function Args", args: [1, 3] },
 ];
-
 function presetConfig(preset) {
-  // Root keys: MinifiyAll (typo from upstream), Virtualize, ASCIIArt, CustomPlugins
   if (preset === "basic" || preset === "light") {
     return {
       MinifiyAll: true,
       Virtualize: false,
-      CustomPlugins: {
-        SwizzleLookups: [100],
-        EncryptStrings: [100],
-        TableIndirection: [100],
-      },
+      CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100], TableIndirection: [100] },
     };
   }
   if (preset === "medium") {
@@ -517,37 +563,25 @@ function presetConfig(preset) {
   return {
     MinifiyAll: true,
     Virtualize: false,
-    CustomPlugins: {
-      SwizzleLookups: [100],
-      EncryptStrings: [100],
-      TableIndirection: [100],
-    },
+    CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100], TableIndirection: [100] },
   };
 }
-
 function buildConfigFromOptions(opts) {
   opts = opts || {};
-  const cfg = {
-    MinifiyAll: opts.MinifiyAll !== false,
-    Virtualize: !!opts.Virtualize,
-  };
+  const cfg = { MinifiyAll: opts.MinifiyAll !== false, Virtualize: !!opts.Virtualize };
   if (opts.Multifile) cfg.Multifile = true;
   if (opts.ASCIIArt) cfg.ASCIIArt = opts.ASCIIArt;
   const plugins = {};
   for (const p of PLUGIN_DEFS) {
-    if (opts[p.key]) {
-      plugins[p.key] = Array.isArray(p.args) ? p.args : [];
-    }
+    if (opts[p.key]) plugins[p.key] = Array.isArray(p.args) ? p.args : [];
   }
   if (Object.keys(plugins).length) cfg.CustomPlugins = plugins;
   return cfg;
 }
-
 function plainLongStringEmbed(code) {
   if (code.includes("]=====]")) return `-- embed\nreturn loadstring([======[\n${code}\n]======])()`;
   return `-- embed\nreturn loadstring([=====[\n${code}\n]=====])()`;
 }
-
 function bit32Embed(code) {
   const key = 0x5a;
   const bytes = [];
@@ -574,51 +608,47 @@ return _fn()
   if (payload.includes("]=====]")) return `return loadstring([======[\n${payload}\n]======])()`;
   return `return loadstring([=====[\n${payload}\n]=====])()`;
 }
-
-
-/** Local Basic obfuscation — no external API (works on 429).
- *  string encryption + simple table indirection + bit32 embed option applied by caller
- */
-
-/** Expand [====[ inner ]====] blocks: if inner looks like Lua, obfuscate inner too */
-
-
-/* ===================== LOCAL OBFUSCATOR (multi-level) ===================== */
-
 function _ghXorStr(s, seed) {
   const bytes = [];
-  for (let k = 0; k < s.length; k++) {
-    bytes.push(s.charCodeAt(k) ^ ((seed + k * 7) & 255));
-  }
+  for (let k = 0; k < s.length; k++) bytes.push(s.charCodeAt(k) ^ ((seed + k * 7) & 255));
   return bytes;
 }
-
 function _ghParseStringsAndComments(src, opts) {
-  // returns { code: with _S[n] placeholders, strings: string[] }
   const strings = [];
   let out = "";
   let i = 0;
   const encrypt = opts.encryptStrings !== false;
   while (i < src.length) {
     const c = src[i];
-    // comments
     if (c === "-" && src[i + 1] === "-") {
       let j = i + 2;
       if (src[j] === "[") {
-        let n = 0; j++;
-        while (src[j] === "=") { n++; j++; }
+        let n = 0;
+        j++;
+        while (src[j] === "=") {
+          n++;
+          j++;
+        }
         if (src[j] === "[") {
           j++;
           while (j < src.length) {
             if (src[j] === "]") {
-              let k = j + 1, m = 0;
-              while (src[k] === "=") { m++; k++; }
-              if (m === n && src[k] === "]") { j = k + 1; break; }
+              let k = j + 1,
+                m = 0;
+              while (src[k] === "=") {
+                m++;
+                k++;
+              }
+              if (m === n && src[k] === "]") {
+                j = k + 1;
+                break;
+              }
             }
             j++;
           }
           if (!opts.stripComments) out += src.slice(i, j);
-          i = j; continue;
+          i = j;
+          continue;
         }
       }
       const lineStart = i;
@@ -626,56 +656,111 @@ function _ghParseStringsAndComments(src, opts) {
       if (!opts.stripComments) out += src.slice(lineStart, i);
       continue;
     }
-    // long brackets kept as-is here
     if (c === "[" && (src[i + 1] === "[" || src[i + 1] === "=")) {
-      let j = i + 1, n = 0;
-      if (src[j] === "=") { while (src[j] === "=") { n++; j++; } }
+      let j = i + 1,
+        n = 0;
+      if (src[j] === "=") {
+        while (src[j] === "=") {
+          n++;
+          j++;
+        }
+      }
       if (src[j] === "[") {
         j++;
         while (j < src.length) {
           if (src[j] === "]") {
-            let k = j + 1, m = 0;
-            while (src[k] === "=") { m++; k++; }
-            if (m === n && src[k] === "]") { j = k + 1; break; }
+            let k = j + 1,
+              m = 0;
+            while (src[k] === "=") {
+              m++;
+              k++;
+            }
+            if (m === n && src[k] === "]") {
+              j = k + 1;
+              break;
+            }
           }
           j++;
         }
         out += src.slice(i, j);
-        i = j; continue;
+        i = j;
+        continue;
       }
     }
     if (encrypt && (c === '"' || c === "'")) {
       const q = c;
-      let j = i + 1, lit = "";
+      let j = i + 1,
+        lit = "";
       while (j < src.length) {
-        if (src[j] === "\\") { lit += src[j] + (src[j + 1] || ""); j += 2; continue; }
-        if (src[j] === q) { j++; break; }
-        lit += src[j]; j++;
+        if (src[j] === "\\") {
+          lit += src[j] + (src[j + 1] || "");
+          j += 2;
+          continue;
+        }
+        if (src[j] === q) {
+          j++;
+          break;
+        }
+        lit += src[j];
+        j++;
       }
       const raw = lit
-        .replace(/\\n/g, "\n").replace(/\\t/g, "\t")
-        .replace(/\\"/g, '"').replace(/\\'/g, "'")
+        .replace(/\\n/g, "\n")
+        .replace(/\\t/g, "\t")
+        .replace(/\\"/g, '"')
+        .replace(/\\'/g, "'")
         .replace(/\\\\/g, "\\");
       strings.push(raw);
       out += "_S[" + strings.length + "]";
-      i = j; continue;
+      i = j;
+      continue;
     }
-    out += c; i++;
+    out += c;
+    i++;
   }
   return { code: out, strings };
 }
-
 function _ghAliasGlobals(code, level) {
-  // level 1: few, level 2: more, level 3: aggressive
   const sets = [
     { game: "_T[1]", workspace: "_T[2]", print: "_T[3]", warn: "_T[4]" },
-    { game: "_T[1]", workspace: "_T[2]", pairs: "_T[3]", ipairs: "_T[4]", pcall: "_T[5]",
-      type: "_T[6]", tostring: "_T[7]", tonumber: "_T[8]", print: "_T[9]", warn: "_T[10]",
-      select: "_T[11]", next: "_T[12]", rawget: "_T[13]", rawset: "_T[14]" },
-    { game: "_T[1]", workspace: "_T[2]", pairs: "_T[3]", ipairs: "_T[4]", pcall: "_T[5]",
-      type: "_T[6]", tostring: "_T[7]", tonumber: "_T[8]", print: "_T[9]", warn: "_T[10]",
-      select: "_T[11]", next: "_T[12]", rawget: "_T[13]", rawset: "_T[14]",
-      require: "_T[15]", tick: "_T[16]", typeof: "_T[17]", unpack: "_T[18]", error: "_T[19]", assert: "_T[20]" },
+    {
+      game: "_T[1]",
+      workspace: "_T[2]",
+      pairs: "_T[3]",
+      ipairs: "_T[4]",
+      pcall: "_T[5]",
+      type: "_T[6]",
+      tostring: "_T[7]",
+      tonumber: "_T[8]",
+      print: "_T[9]",
+      warn: "_T[10]",
+      select: "_T[11]",
+      next: "_T[12]",
+      rawget: "_T[13]",
+      rawset: "_T[14]",
+    },
+    {
+      game: "_T[1]",
+      workspace: "_T[2]",
+      pairs: "_T[3]",
+      ipairs: "_T[4]",
+      pcall: "_T[5]",
+      type: "_T[6]",
+      tostring: "_T[7]",
+      tonumber: "_T[8]",
+      print: "_T[9]",
+      warn: "_T[10]",
+      select: "_T[11]",
+      next: "_T[12]",
+      rawget: "_T[13]",
+      rawset: "_T[14]",
+      require: "_T[15]",
+      tick: "_T[16]",
+      typeof: "_T[17]",
+      unpack: "_T[18]",
+      error: "_T[19]",
+      assert: "_T[20]",
+    },
   ];
   const aliases = sets[Math.max(0, Math.min(2, level - 1))];
   let body = code;
@@ -689,12 +774,9 @@ function _ghAliasGlobals(code, level) {
   };
   return { body, tInit: list[level] || list[2] };
 }
-
 function _ghEncodeNumbers(code, level) {
   if (level < 2) return code;
-  // replace standalone integers 2..99999 with expression (not in _S/_T indices carefully)
   return code.replace(/\b([2-9]\d{0,4})\b/g, (m, n, off, s) => {
-    // skip if part of _S[n] or _T[n]
     const before = s.slice(Math.max(0, off - 3), off);
     if (/_S\[$|_T\[$/.test(before) || before.endsWith("[")) return m;
     const v = Number(n);
@@ -705,7 +787,6 @@ function _ghEncodeNumbers(code, level) {
     return "(" + (v + 17) + "-17)";
   });
 }
-
 function _ghJunk(level) {
   if (level < 2) return "";
   const lines = [];
@@ -715,14 +796,19 @@ function _ghJunk(level) {
   }
   return lines.join("\n") + "\n";
 }
-
 function _ghWrapRuntime(body, strings, tInit, seed) {
   const strTable = strings.map((s) => "{" + _ghXorStr(s, seed).join(",") + "}").join(",");
   return (
     "-- GH local obfuscate\n" +
-    "local _T={" + tInit + "}\n" +
+    "local _T={" +
+    tInit +
+    "}\n" +
     "local _S={}\n" +
-    "do local _d={" + strTable + "} local _k=" + seed + "\n" +
+    "do local _d={" +
+    strTable +
+    "} local _k=" +
+    seed +
+    "\n" +
     "for _i=1,#_d do local _b=_d[_i] local _o={} for _j=1,#_b do " +
     "_o[_j]=string.char(bit32.bxor(_b[_j],bit32.band(_k+(_j-1)*7,255))) end " +
     "_S[_i]=table.concat(_o) end end\n" +
@@ -730,38 +816,43 @@ function _ghWrapRuntime(body, strings, tInit, seed) {
     body
   );
 }
-
 function _ghObfuscateChunk(src, level) {
-  const seed = 0x5a + (level * 13);
-  const parsed = _ghParseStringsAndComments(src, {
-    encryptStrings: true,
-    stripComments: level >= 2,
-  });
+  const seed = 0x5a + level * 13;
+  const parsed = _ghParseStringsAndComments(src, { encryptStrings: true, stripComments: level >= 2 });
   let code = parsed.code;
   const aliased = _ghAliasGlobals(code, level);
   code = aliased.body;
   code = _ghEncodeNumbers(code, level);
-  if (level >= 2) {
-    // minify-ish whitespace
-    code = code.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
-  }
+  if (level >= 2) code = code.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
   return _ghWrapRuntime(code, parsed.strings, aliased.tInit, seed);
 }
-
 function _ghProcessLongBrackets(code, level) {
-  let i = 0, out = "";
+  let i = 0,
+    out = "";
   while (i < code.length) {
     if (code[i] === "[") {
-      let j = i + 1, n = 0;
-      while (code[j] === "=") { n++; j++; }
+      let j = i + 1,
+        n = 0;
+      while (code[j] === "=") {
+        n++;
+        j++;
+      }
       if (code[j] === "[") {
         const openEnd = j + 1;
-        let k = openEnd, closeAt = -1;
+        let k = openEnd,
+          closeAt = -1;
         while (k < code.length) {
           if (code[k] === "]") {
-            let m = 0, p = k + 1;
-            while (code[p] === "=") { m++; p++; }
-            if (m === n && code[p] === "]") { closeAt = k; break; }
+            let m = 0,
+              p = k + 1;
+            while (code[p] === "=") {
+              m++;
+              p++;
+            }
+            if (m === n && code[p] === "]") {
+              closeAt = k;
+              break;
+            }
           }
           k++;
         }
@@ -787,26 +878,35 @@ function _ghProcessLongBrackets(code, level) {
   }
   return out;
 }
-
-/** level: 1 basic, 2 medium-local, 3 full-local */
 function localObfuscate(code, level) {
   level = Math.max(1, Math.min(3, level || 1));
-  // 1) obfuscate lua inside long brackets
   const step1 = _ghProcessLongBrackets(code, level);
-  // 2) obfuscate plain parts only (leave long brackets intact)
-  let i = 0, out = "";
+  let i = 0,
+    out = "";
   while (i < step1.length) {
     if (step1[i] === "[") {
-      let j = i + 1, n = 0;
-      while (step1[j] === "=") { n++; j++; }
+      let j = i + 1,
+        n = 0;
+      while (step1[j] === "=") {
+        n++;
+        j++;
+      }
       if (step1[j] === "[") {
         const openEnd = j + 1;
-        let k = openEnd, closeAt = -1;
+        let k = openEnd,
+          closeAt = -1;
         while (k < step1.length) {
           if (step1[k] === "]") {
-            let m = 0, p = k + 1;
-            while (step1[p] === "=") { m++; p++; }
-            if (m === n && step1[p] === "]") { closeAt = k; break; }
+            let m = 0,
+              p = k + 1;
+            while (step1[p] === "=") {
+              m++;
+              p++;
+            }
+            if (m === n && step1[p] === "]") {
+              closeAt = k;
+              break;
+            }
           }
           k++;
         }
@@ -820,8 +920,12 @@ function localObfuscate(code, level) {
     let start = i;
     while (i < step1.length) {
       if (step1[i] === "[") {
-        let j = i + 1, n = 0;
-        while (step1[j] === "=") { n++; j++; }
+        let j = i + 1,
+          n = 0;
+        while (step1[j] === "=") {
+          n++;
+          j++;
+        }
         if (step1[j] === "[") break;
       }
       i++;
@@ -832,12 +936,9 @@ function localObfuscate(code, level) {
   }
   return out;
 }
-
-// backwards-compatible name
 function localBasicObfuscate(code) {
   return localObfuscate(code, 1);
 }
-
 async function withTimeout(promise, ms) {
   let timer;
   try {
@@ -851,16 +952,10 @@ async function withTimeout(promise, ms) {
     if (timer) clearTimeout(timer);
   }
 }
-
 async function callLuaObf(apiKey, code, cfg) {
-  // Docs: POST https://luaobfuscator.com/api/obfuscator/newscript
-  // body = raw lua, header apikey
   const newRes = await fetch(LUAOBF_NEW, {
     method: "POST",
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      apikey: apiKey,
-    },
+    headers: { "Content-Type": "text/plain; charset=utf-8", apikey: apiKey },
     body: code,
   });
   if (!newRes.ok) {
@@ -873,15 +968,8 @@ async function callLuaObf(apiKey, code, cfg) {
   } catch {
     return { ok: false, error: "newscript: invalid JSON" };
   }
-  const sessionId =
-    session.sessionId ||
-    newRes.headers.get("sessionId") ||
-    newRes.headers.get("sessionid");
-  if (!sessionId) {
-    return { ok: false, error: session.message || "no sessionId from newscript" };
-  }
-
-  // Docs: POST .../obfuscate  headers apikey + sessionId, body = config JSON
+  const sessionId = session.sessionId || newRes.headers.get("sessionId") || newRes.headers.get("sessionid");
+  if (!sessionId) return { ok: false, error: session.message || "no sessionId from newscript" };
   const runRes = await fetch(LUAOBF_RUN, {
     method: "POST",
     headers: {
@@ -901,12 +989,9 @@ async function callLuaObf(apiKey, code, cfg) {
   } catch {
     return { ok: false, error: "obfuscate: invalid JSON" };
   }
-  if (!out.code) {
-    return { ok: false, error: out.message || "empty code from API" };
-  }
+  if (!out.code) return { ok: false, error: out.message || "empty code from API" };
   return { ok: true, code: out.code, sessionId };
 }
-
 function syntaxCheck(code) {
   const issues = [];
   if (!code || !code.trim()) return { ok: false, issues: ["empty code"] };
@@ -914,13 +999,11 @@ function syntaxCheck(code) {
   const stack = [];
   let i = 0;
   let line = 1;
-  let inStr = null; // '"', "'", "long"
+  let inStr = null;
   let longEq = 0;
   while (i < code.length) {
     const c = code[i];
     if (c === "\n") line++;
-
-    // long strings [[ ]] and [=[ ]=]
     if (!inStr && c === "[" && code[i + 1] === "[") {
       inStr = "long";
       longEq = 0;
@@ -958,10 +1041,7 @@ function syntaxCheck(code) {
       i++;
       continue;
     }
-
-    // comments: -- line OR --[[ long ]] OR --[=[ long ]=]
     if (!inStr && c === "-" && code[i + 1] === "-") {
-      // long comment?
       let j = i + 2;
       if (code[j] === "[") {
         let n = 0;
@@ -971,7 +1051,6 @@ function syntaxCheck(code) {
           j++;
         }
         if (code[j] === "[") {
-          // skip until matching ]=...=]
           j++;
           while (j < code.length) {
             if (code[j] === "\n") line++;
@@ -996,11 +1075,9 @@ function syntaxCheck(code) {
           continue;
         }
       }
-      // line comment
       while (i < code.length && code[i] !== "\n") i++;
       continue;
     }
-
     if (!inStr && (c === '"' || c === "'")) {
       inStr = c;
       i++;
@@ -1015,7 +1092,6 @@ function syntaxCheck(code) {
       i++;
       continue;
     }
-
     if (pairs[c]) stack.push({ ch: c, line });
     else if (c === ")" || c === "]" || c === "}") {
       const top = stack.pop();
@@ -1027,40 +1103,26 @@ function syntaxCheck(code) {
   for (const s of stack) issues.push(`line ${s.line}: unclosed '${s.ch}'`);
   return { ok: issues.length === 0, issues };
 }
-
 function obfuscatePage(siteName) {
   return pageShell(
     "Obfuscator · " + siteName,
     `
 <div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">API: luaobfuscator.com/api (session + plugins). Basic=local L1. Medium/Full/VM=API first, local fallback if 429.</p>
-
+<p class="muted">API: luaobfuscator.com. Basic=local L1. Medium/Full/VM=API first, local fallback.</p>
 <label>Preset</label>
 <select id="preset">
-  <option value="basic" selected>Basic — local L1 (table + strings)</option>
-  <option value="medium">Medium — API or local L2</option>
-  <option value="full">Full — API Virtualize/VM or local L3</option>
-  <option value="vm">VM only — API Virtualize (fallback local L3)</option>
-  <option value="embed">Wrap loadstring([====[ ])</option>
+  <option value="basic" selected>Basic — local L1</option>
+  <option value="medium">Medium</option>
+  <option value="full">Full</option>
+  <option value="vm">VM</option>
+  <option value="embed">Wrap loadstring</option>
   <option value="embed_bit32">Wrap bit32+loadstring</option>
-  <option value="custom">Custom API plugins</option>
+  <option value="custom">Custom</option>
 </select>
-
 <div id="customBox" style="display:none;margin-top:10px">
-  <label>Root</label>
   <label class="chk"><input type="checkbox" data-root="MinifiyAll" checked/> Minify All</label>
   <label class="chk"><input type="checkbox" data-root="Virtualize"/> Virtualize</label>
-  <label class="chk"><input type="checkbox" data-root="Multifile"/> Multifile</label>
-  <label>Plugins</label>
-  <div class="plugins">
-    <label class="chk"><input type="checkbox" data-plugin="EncryptStrings" checked/> Encrypt Strings</label>
-    <label class="chk"><input type="checkbox" data-plugin="SwizzleLookups" checked/> Table indirection</label>
-    <label class="chk"><input type="checkbox" data-plugin="EncryptFuncDeclaration"/> Encrypt Func Declaration</label>
-    <label class="chk"><input type="checkbox" data-plugin="ControlFlowFlattenV1AllBlocks"/> Control Flow Flatten</label>
-    <label class="chk"><input type="checkbox" data-plugin="JunkifyAllIfStatements"/> Junkify Ifs</label>
-  </div>
 </div>
-
 <label style="margin-top:14px">Input Lua</label>
 <textarea id="input" placeholder="paste Lua..." style="min-height:220px"></textarea>
 <div class="actions">
@@ -1068,11 +1130,9 @@ function obfuscatePage(siteName) {
   <button class="secondary" id="checkIn">Syntax check</button>
   <button class="secondary" id="copy">Copy output</button>
 </div>
-
 <label style="margin-top:14px">Output</label>
 <textarea id="output" placeholder="result..." style="min-height:220px"></textarea>
 <p id="status" class="muted"></p>
-
 <script>
 const statusEl=document.getElementById('status');
 const input=document.getElementById('input');
@@ -1087,15 +1147,14 @@ function collectOptions(){
   document.querySelectorAll('[data-plugin]').forEach(el=>opts[el.getAttribute('data-plugin')]=el.checked);
   return opts;
 }
-async function doCheck(){
+document.getElementById('checkIn').onclick=async()=>{
   statusEl.textContent='Checking...';
   try{
     const res=await fetch('/api/syntax-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:input.value||''})});
     const data=await res.json();
     statusEl.innerHTML=data.ok?'<span class="ok">Syntax OK</span>':'<span class="error">'+(data.issues||[]).join('<br>')+'</span>';
   }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
-}
-document.getElementById('checkIn').onclick=()=>doCheck();
+};
 runBtn.onclick=async()=>{
   const code=input.value||'';
   if(!code.trim()){statusEl.textContent='Paste code first';return}
@@ -1108,10 +1167,10 @@ runBtn.onclick=async()=>{
       runBtn.disabled=false;return;
     }
     if(!data.ok){
-      statusEl.innerHTML='<span class="error">'+(data.error||'failed')+(data.hint?('<br>'+data.hint):'')+'</span>';
+      statusEl.innerHTML='<span class="error">'+(data.error||'failed')+'</span>';
     } else {
       output.value=data.code||'';
-      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>'+(data.note?('<br><span class="muted">'+data.note+'</span>'):'');
+      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>';
     }
   }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
   runBtn.disabled=false;
@@ -1123,7 +1182,6 @@ document.getElementById('copy').onclick=async()=>{
 `
   );
 }
-
 /* ===================== ROUTER ===================== */
 export default {
   async fetch(request, env) {
@@ -1131,27 +1189,20 @@ export default {
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
-
       const url = new URL(request.url);
       const path = url.pathname;
-
-      // --- Lua proxies (mixask/GH) ---
+      // Lua proxies
       if (path === "/loader.lua") return proxyGithub("greedyloader.lua");
       if (path === "/script.lua") return proxyGithub("greedy.lua");
       if (path === "/library.lua") return proxyGithub("greedylibrary.lua");
       if (path === "/modules.lua") return proxyGithub("greedymodules.lua");
-
-      // --- Obfuscator ---
+      // Obfuscator
       if (
         request.method === "GET" &&
-        (path === "/obfuscate" ||
-          path === "/obfuscate/" ||
-          path === "/obfuscator" ||
-          path === "/obfuscator/")
+        (path === "/obfuscate" || path === "/obfuscate/" || path === "/obfuscator" || path === "/obfuscator/")
       ) {
         return html(obfuscatePage(env.SITE_NAME || "Greedy Hudzell"));
       }
-
       if (request.method === "POST" && path === "/api/syntax-check") {
         let body;
         try {
@@ -1163,7 +1214,6 @@ export default {
         if (!Array.isArray(sc.issues)) sc.issues = [];
         return json(sc);
       }
-
       if (request.method === "POST" && path === "/api/obfuscate") {
         let body;
         try {
@@ -1175,42 +1225,19 @@ export default {
         const preset = body.preset || "basic";
         if (!code || code.length < 2) return json({ ok: false, error: "empty code" }, 400);
         if (code.length > 1_500_000) return json({ ok: false, error: "code too large" }, 413);
-
         const apiKey = env.LUAOBF_API_KEY || LUAOBF_FALLBACK;
-
-        // pure local embeds
-        if (preset === "embed") {
-          return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
-        }
-        if (preset === "embed_bit32") {
-          return json({ ok: true, code: bit32Embed(code), mode: "embed_bit32" });
-        }
-
-        // Basic = local level 1 only (fast, no API)
+        if (preset === "embed") return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
+        if (preset === "embed_bit32") return json({ ok: true, code: bit32Embed(code), mode: "embed_bit32" });
         if (preset === "basic") {
           try {
-            return json({
-              ok: true,
-              code: localObfuscate(code, 1),
-              mode: "basic",
-              note: "local L1 table+strings",
-            });
+            return json({ ok: true, code: localObfuscate(code, 1), mode: "basic", note: "local L1" });
           } catch (e) {
             return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
           }
         }
-
-        // medium / full / vm / custom → try API first
         const cfg =
-          preset === "custom"
-            ? buildConfigFromOptions(body.options || {})
-            : presetConfig(preset === "vm" ? "full" : preset);
-
-        // ensure Virtualize flag for vm/full
-        if (preset === "full" || preset === "vm") {
-          cfg.Virtualize = true;
-        }
-
+          preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset === "vm" ? "full" : preset);
+        if (preset === "full" || preset === "vm") cfg.Virtualize = true;
         try {
           const result = await withTimeout(callLuaObf(apiKey, code, cfg), 20000);
           if (result && result.ok && result.code) {
@@ -1223,28 +1250,24 @@ export default {
             });
           }
           const err = (result && result.error) || "api failed";
-          // local fallback with matching strength
           const level = preset === "full" || preset === "vm" ? 3 : 2;
-          const src = localObfuscate(code, level);
           return json({
             ok: true,
-            code: src,
+            code: localObfuscate(code, level),
             mode: preset + "_local_L" + level,
-            note: "API fail (" + err + ") → local level " + level + (cfg.Virtualize ? " (VM not available offline)" : ""),
+            note: "API fail (" + err + ") → local L" + level,
           });
         } catch (e) {
           const level = preset === "full" || preset === "vm" ? 3 : 2;
-          const src = localObfuscate(code, level);
           return json({
             ok: true,
-            code: src,
+            code: localObfuscate(code, level),
             mode: preset + "_local_L" + level,
-            note: "API timeout/error → local L" + level + ": " + String(e && e.message ? e.message : e),
+            note: "API error → local L" + level + ": " + String(e && e.message ? e.message : e),
           });
         }
       }
-
-      // --- HOME ---
+      // HOME
       if (request.method === "GET" && path === "/") {
         return html(
           pageShell(
@@ -1258,8 +1281,7 @@ export default {
           )
         );
       }
-
-      // --- KEY SYSTEM ---
+      // KEY SYSTEM
       if (request.method === "GET" && path.startsWith("/get-key/token/")) {
         const token = decodeURIComponent(path.slice("/get-key/token/".length));
         return await handleGetKeyToken(request, env, token);
@@ -1270,15 +1292,16 @@ export default {
       }
       if (request.method === "POST" && path === "/generate-key") return await handleGenerateKey(request, env);
       if (request.method === "POST" && path === "/validate") return await handleValidate(request, env);
-
+      // ADMIN
       const adminMatch = path.match(/^\/keys\/([^/]+)\/encrypted\/get-keys-all$/);
       if (request.method === "GET" && adminMatch) return await handleAdminKeys(request, env, adminMatch[1]);
+      if (request.method === "POST" && path === "/admin/generate") return await handleAdminGenerate(request, env);
+      if (request.method === "POST" && path === "/admin/renew") return await handleAdminRenew(request, env);
       if (request.method === "POST" && path === "/admin/revoke") return await handleAdminRevoke(request, env);
       const adminKeyMatch = path.match(/^\/admin\/key\/(.+)$/);
       if (request.method === "GET" && adminKeyMatch) {
         return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
       }
-
       return json({ error: "Not found" }, 404);
     } catch (error) {
       console.error("Worker error:", error);
