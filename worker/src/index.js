@@ -1445,21 +1445,6 @@ function tosPage() {
 `);
 }
 
-
-/* ROUTER: replace the HOME block and add pages. Example:
-
-  // / → /home
-  if (request.method === "GET" && (path === "/" || path === "")) {
-    return Response.redirect(new URL("/home", url).toString(), 302);
-  }
-  if (request.method === "GET" && path === "/home") return html(homePage());
-  if (request.method === "GET" && path === "/status") return html(statusPage());
-  if (request.method === "GET" && path === "/executors") return html(executorsPage());
-  if (request.method === "GET" && path === "/guide") return html(guidePage());
-  if (request.method === "GET" && path === "/pricing") return html(pricingPage());
-  if (request.method === "GET" && path === "/tos") return html(tosPage());
-
-*/
 /* ===================== ROUTER ===================== */
 export default {
   async fetch(request, env) {
@@ -1467,13 +1452,34 @@ export default {
       if (request.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
+      
       const url = new URL(request.url);
-      const path = url.pathname;
+      // нормализация: "/" и "" и иногда без слэша
+      let path = url.pathname;
+      if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
+      if (path === "") path = "/";
+
+      // РЕДИРЕКТ — сразу, до любого html на "/"
+      if (request.method === "GET" && path === "/") {
+        return Response.redirect(new URL("/home", request.url).toString(), 302);
+      }
+
+      // страницы
+      if (request.method === "GET" && path === "/home") {
+        return html(homePage());
+      }
+      if (request.method === "GET" && path === "/status") return html(statusPage());
+      if (request.method === "GET" && path === "/executors") return html(executorsPage());
+      if (request.method === "GET" && path === "/guide") return html(guidePage());
+      if (request.method === "GET" && path === "/pricing") return html(pricingPage());
+      if (request.method === "GET" && path === "/tos") return html(tosPage());
+
       // Lua proxies
       if (path === "/loader.lua") return proxyGithub("greedyloader.lua");
       if (path === "/script.lua") return proxyGithub("greedy.lua");
       if (path === "/library.lua") return proxyGithub("greedylibrary.lua");
       if (path === "/modules.lua") return proxyGithub("greedymodules.lua");
+      
       // Obfuscator
       if (
         request.method === "GET" &&
@@ -1545,20 +1551,7 @@ export default {
           });
         }
       }
-      // HOME
-      if (request.method === "GET" && path === "/") {
-        return html(
-          pageShell(
-            env.SITE_NAME || "Greedy Hudzell",
-            `<div class="logo">${env.SITE_NAME || "Greedy Hudzell"}</div>
-            <p class="muted">Key system online.</p>
-            <div class="nav" style="margin-top:18px">
-              <a href="/obfuscator">Lua Obfuscator →</a>
-              <a href="https://discord.gg/sbVuaT9a2T">Discord</a>
-            </div>`
-          )
-        );
-      }
+      
       // KEY SYSTEM
       if (request.method === "GET" && path.startsWith("/get-key/token/")) {
         const token = decodeURIComponent(path.slice("/get-key/token/".length));
@@ -1570,6 +1563,7 @@ export default {
       }
       if (request.method === "POST" && path === "/generate-key") return await handleGenerateKey(request, env);
       if (request.method === "POST" && path === "/validate") return await handleValidate(request, env);
+      
       // ADMIN
       const adminMatch = path.match(/^\/keys\/([^/]+)\/encrypted\/get-keys-all$/);
       if (request.method === "GET" && adminMatch) return await handleAdminKeys(request, env, adminMatch[1]);
@@ -1580,6 +1574,7 @@ export default {
       if (request.method === "GET" && adminKeyMatch) {
         return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
       }
+      
       return json({ error: "Not found" }, 404);
     } catch (error) {
       console.error("Worker error:", error);
