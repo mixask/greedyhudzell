@@ -1449,7 +1449,11 @@ function pricingPage() {
       });
       const data = await res.json();
       if (!data.ok || !data.url) {
-        if (status) status.textContent = data.error || "Checkout failed";
+        if (status) {
+          status.textContent =
+            (data.error || "Checkout failed") +
+            (data.details ? " — " + data.details : "");
+        }
         if (btn) btn.disabled = false;
         return;
       }
