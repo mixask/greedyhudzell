@@ -5,15 +5,9 @@
  * - Lua proxies + Obfuscator
  *
  * Bindings: DB (D1)
- * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional), STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
+ * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional)
  * Vars: SITE_NAME
  */
-import {
-  createStripeCheckout,
-  handleStripeWebhook,
-  handlePremiumStatus,
-} from "./stripe.js";
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -1207,65 +1201,136 @@ function siteNav(active) {
   return items
     .map(([href, label]) => {
       const on = active === label.toLowerCase();
-      return `<a href="${href}" style="padding:6px 12px;border-radius:999px;border:1px solid ${on ? "#C9A227" : "#333"};background:${on ? "#C9A227" : "transparent"};color:${on ? "#0a0a0a" : "#aaa"};text-decoration:none;font-size:12px;font-weight:600">${label}</a>`;
+      return `<a href="${href}" class="${on ? "active" : ""}">${label}</a>`;
     })
-    .join(" ");
+    .join("");
 }
 
 function siteShell(title, active, bodyHtml, wide = false) {
-  return `<!doctype html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>${title} · Greedy Hudzell</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
 <style>
+:root{
+  --bg:#0a0a0a;--bg2:#111;--card:#141414;--border:#2a2a2a;
+  --text:#f2f2f2;--muted:#9a9a9a;--gold:#C9A227;--gold-soft:#E8C547;
+  --ok:#4caf7a;--bad:#e85d5d;--radius:16px;
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{min-height:100vh;background:#0a0a0a;color:#f2f2f2;font-family:Inter,Arial,sans-serif;line-height:1.55;
-background-image:radial-gradient(ellipse 80% 50% at 50% -20%,rgba(201,162,39,.08),transparent)}
-a{color:#E8C547}
-.top{position:sticky;top:0;z-index:20;backdrop-filter:blur(12px);background:rgba(10,10,10,.85);border-bottom:1px solid #2a2a2a}
-.top-inner{max-width:1100px;margin:0 auto;padding:12px 16px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between}
-.brand{color:#fff;text-decoration:none;font-weight:800;letter-spacing:.5px}
+body{
+  font-family:Inter,system-ui,sans-serif;background:var(--bg);color:var(--text);
+  min-height:100vh;line-height:1.55;
+  background-image:
+    radial-gradient(ellipse 80% 50% at 50% -20%,rgba(201,162,39,.08),transparent),
+    radial-gradient(ellipse 60% 40% at 100% 100%,rgba(255,255,255,.03),transparent);
+}
+a{color:var(--gold-soft);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{width:min(980px,94vw);margin:0 auto;padding:28px 0 80px}
+.wrap.wide{width:min(1100px,94vw)}
+.top{
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(14px);
+  background:rgba(10,10,10,.78);border-bottom:1px solid var(--border);
+}
+.top-inner{
+  width:min(1100px,94vw);margin:0 auto;display:flex;align-items:center;
+  justify-content:space-between;gap:16px;padding:14px 0;flex-wrap:wrap;
+}
+.brand{display:flex;align-items:center;gap:12px;font-weight:700;color:var(--text);text-decoration:none}
+.brand:hover{text-decoration:none}
+.brand-mark{
+  width:34px;height:34px;border-radius:10px;
+  background:linear-gradient(135deg,#1a1a1a,#2a2410);
+  border:1px solid var(--gold);display:grid;place-items:center;
+  color:var(--gold);font-size:14px;font-weight:700;
+}
 .nav{display:flex;flex-wrap:wrap;gap:6px}
-.wrap{max-width:${wide ? "1100px" : "820px"};margin:0 auto;padding:28px 16px 70px}
-h1{font-size:1.75rem;margin:8px 0 6px}
-.sub{color:#9a9a9a;font-size:14px;margin-bottom:18px}
-.badge{display:inline-block;font-size:11px;font-weight:700;color:#C9A227;border:1px solid rgba(201,162,39,.3);background:rgba(201,162,39,.1);padding:2px 8px;border-radius:999px;margin-bottom:10px}
-.card{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:18px;margin:12px 0}
+.nav a{
+  color:var(--muted);padding:8px 14px;border-radius:999px;
+  border:1px solid transparent;font-size:13px;font-weight:500;text-decoration:none;
+}
+.nav a:hover{color:var(--text);border-color:var(--border);background:var(--card);text-decoration:none}
+.nav a.active{color:#0a0a0a;background:var(--gold);border-color:var(--gold)}
+.page-header{margin:28px 0 22px}
+.page-header h1{font-size:1.85rem;font-weight:700;margin-bottom:6px}
+.page-header .sub{color:var(--muted);font-size:14px}
+.badge{
+  display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;
+  border-radius:999px;background:rgba(201,162,39,.12);color:var(--gold);
+  border:1px solid rgba(201,162,39,.25);margin-bottom:14px;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;margin:12px 0;
+}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:720px){.grid2{grid-template-columns:1fr}}
-label.f{display:block;color:#9a9a9a;font-size:12px;margin:10px 0 6px;font-weight:600}
-input,select,textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #333;background:#080808;color:#fff}
-.btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border-radius:999px;border:1px solid #333;background:#181818;color:#fff;font-weight:700;cursor:pointer;text-decoration:none;font-size:13px}
-.btn-gold{background:linear-gradient(135deg,#C9A227,#a8841a);color:#0a0a0a;border-color:#C9A227}
-.muted{color:#9a9a9a;font-size:13px}
-.ok{color:#6dff9a}.err{color:#ff6d6d}
+label.f{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:600}
+input,select,textarea{
+  width:100%;border-radius:10px;border:1px solid var(--border);
+  background:#0c0c0c;color:var(--text);padding:11px 12px;font-size:13px;
+}
+input:focus,select:focus,textarea:focus{outline:1px solid rgba(201,162,39,.4)}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:11px 16px;border-radius:999px;border:1px solid var(--border);
+  background:var(--bg2);color:var(--text);font-weight:600;font-size:13px;
+  cursor:pointer;text-decoration:none;
+}
+.btn:hover{border-color:var(--gold);color:var(--gold-soft);text-decoration:none}
+.btn-gold{
+  background:linear-gradient(135deg,var(--gold),#a8841a);
+  color:#0a0a0a;border-color:var(--gold);
+}
+.btn-gold:hover{color:#0a0a0a;filter:brightness(1.05);text-decoration:none}
+.muted{color:var(--muted);font-size:13px}
+.ok{color:var(--ok)}
+.err{color:var(--bad)}
 table{width:100%;border-collapse:collapse;font-size:13px}
-th,td{text-align:left;padding:10px 8px;border-bottom:1px solid #2a2a2a}
-th{color:#9a9a9a;font-size:11px;text-transform:uppercase}
-.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.hero-actions{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+.price-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:18px 0}
 @media(max-width:900px){.price-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:520px){.price-grid{grid-template-columns:1fr}}
-.pcard{background:#141414;border:1px solid #2a2a2a;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px;position:relative}
-.pcard.feat{border-color:#C9A227}
-.pcard .amt{font-size:1.6rem;font-weight:800;color:#E8C547}
-.pcard ul{list-style:none;padding:0;margin:6px 0;flex:1}
-.pcard li{font-size:13px;color:#ccc;padding:3px 0}
-.foot{margin-top:28px;text-align:center;color:#555;font-size:12px}
-.hero-actions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0}
+.price-card{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;display:flex;flex-direction:column;gap:8px;position:relative;
+}
+.price-card.featured{border-color:var(--gold);box-shadow:0 0 0 1px rgba(201,162,39,.2)}
+.price-card .tag{
+  position:absolute;top:12px;right:12px;font-size:10px;font-weight:700;
+  background:var(--gold);color:#0a0a0a;padding:3px 8px;border-radius:999px;
+}
+.price-card h3{font-size:1rem;font-weight:600}
+.price-card .amount{font-size:1.7rem;font-weight:700;color:var(--gold-soft)}
+.price-card .amount span{font-size:12px;color:var(--muted);font-weight:500}
+.price-card ul{list-style:none;padding:0;margin:6px 0;flex:1}
+.price-card ul li{font-size:13px;color:#c8c8c8;padding:4px 0 4px 16px;position:relative}
+.price-card ul li::before{content:"✓";position:absolute;left:0;color:var(--gold);font-size:12px}
+.foot{margin-top:32px;text-align:center;color:#555;font-size:12px}
 </style>
 </head>
 <body>
-<header class="top"><div class="top-inner">
-  <a class="brand" href="/home">GREEDY HUDZELL</a>
-  <nav class="nav">${siteNav(active)}</nav>
-</div></header>
-<main class="wrap">
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="/home">
+      <div class="brand-mark">GH</div>
+      <span>Greedy Hudzell</span>
+    </a>
+    <nav class="nav">${siteNav(active)}</nav>
+  </div>
+</header>
+<main class="wrap${wide ? " wide" : ""}">
 ${bodyHtml}
-<div class="foot">© Greedy Hudzell · <a href="${DISCORD_INVITE}">Discord</a> · Not affiliated with Roblox</div>
+  <div class="foot">© Greedy Hudzell · <a href="${DISCORD_INVITE}">Discord</a> · Not affiliated with Roblox</div>
 </main>
-</body></html>`;
+</body>
+</html>`;
 }
 
 function fmtSunc(v) {
@@ -1418,139 +1483,57 @@ function guidePage() {
 
 function pricingPage() {
   return siteShell("Pricing", "pricing", `
-  <div class="badge">USD</div>
-  <h1>Pricing</h1>
-  <p class="sub">Paid plans include account rewire. Free does not. One-time payment → fixed key duration.</p>
-  <div class="card" style="margin-bottom:14px">
-    <label class="f">Roblox username (required for paid plans)</label>
-    <input id="paid_username" maxlength="20" placeholder="Not display name" autocomplete="off"/>
-    <p class="muted" style="margin-top:8px">Key will be bound to this username. Use the same name in the loader.</p>
+  <div class="page-header">
+    <div class="badge">USD</div>
+    <h1>Pricing</h1>
+    <p class="sub">Free day key via Work.ink · Paid plans include <b>account rewire</b></p>
   </div>
   <div class="price-grid">
-    <div class="pcard"><h3>Free</h3><div class="amt">$0 <span class="muted">/24h</span></div>
-      <ul><li>Full access</li><li>1 username</li><li>No rewire</li></ul>
-      <a class="btn" href="${FREE_KEY_LINK}" target="_blank" rel="noopener">Get free key</a></div>
-    <div class="pcard"><h3>Week</h3><div class="amt">$3.99</div>
-      <ul><li>7 days</li><li>Rewire</li></ul>
-      <button class="btn" type="button" data-plan="week">Buy</button></div>
-    <div class="pcard feat"><h3>Month</h3><div class="amt">$6.99</div>
-      <ul><li>30 days</li><li>Rewire</li><li>Popular</li></ul>
-      <button class="btn btn-gold" type="button" data-plan="month">Buy</button></div>
-    <div class="pcard"><h3>Year</h3><div class="amt">$12.99</div>
-      <ul><li>365 days</li><li>Rewire</li></ul>
-      <button class="btn" type="button" data-plan="year">Buy</button></div>
+    <article class="price-card">
+      <h3>Free</h3>
+      <div class="amount">$0 <span>/ 24h</span></div>
+      <ul>
+        <li>Full script access</li>
+        <li>1 Roblox username</li>
+        <li>Work.ink unlock</li>
+        <li>No rewire</li>
+      </ul>
+      <a class="btn" href="${FREE_KEY_LINK}" target="_blank" rel="noopener">Get free key</a>
+    </article>
+    <article class="price-card">
+      <h3>Week</h3>
+      <div class="amount">$3.99 <span>/ 7 days</span></div>
+      <ul>
+        <li>Full script access</li>
+        <li>Account rewire included</li>
+        <li>Priority Discord support</li>
+      </ul>
+      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy on Discord</a>
+    </article>
+    <article class="price-card featured">
+      <span class="tag">Popular</span>
+      <h3>Month</h3>
+      <div class="amount">$6.99 <span>/ 30 days</span></div>
+      <ul>
+        <li>Full script access</li>
+        <li>Account rewire included</li>
+        <li>Best balance price / time</li>
+      </ul>
+      <a class="btn btn-gold" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy on Discord</a>
+    </article>
+    <article class="price-card">
+      <h3>Year</h3>
+      <div class="amount">$12.99 <span>/ 365 days</span></div>
+      <ul>
+        <li>Full script access</li>
+        <li>Account rewire included</li>
+        <li>Best long-term value</li>
+      </ul>
+      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy on Discord</a>
+    </article>
   </div>
-  <p id="stripe-status" class="muted" style="margin-top:14px;text-align:center"></p>
-<script>
-(function(){
-  const status = document.getElementById("stripe-status");
-  const userInput = document.getElementById("paid_username");
-  function validUsername(u) {
-    u = (u || "").trim();
-    return u.length >= 3 && u.length <= 20 && /^[A-Za-z0-9_]+$/.test(u);
-  }
-  async function startCheckout(plan, btn) {
-    const username = (userInput.value || "").trim();
-    if (!validUsername(username)) {
-      if (status) status.textContent = "Enter a valid Roblox username (3-20: letters, numbers, _).";
-      userInput.focus();
-      return;
-    }
-    if (status) status.textContent = "Redirecting to Stripe...";
-    if (btn) btn.disabled = true;
-    try {
-      const res = await fetch("/api/stripe/checkout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan, username })
-      });
-      const data = await res.json();
-      if (!data.ok || !data.url) {
-        if (status) {
-          status.textContent =
-            (data.error || "Checkout failed") +
-            (data.details ? " — " + data.details : "");
-        }
-        if (btn) btn.disabled = false;
-        return;
-      }
-      window.location.href = data.url;
-    } catch (e) {
-      if (status) status.textContent = String(e);
-      if (btn) btn.disabled = false;
-    }
-  }
-  document.querySelectorAll("[data-plan]").forEach(function(btn) {
-    btn.addEventListener("click", function() {
-      startCheckout(btn.getAttribute("data-plan"), btn);
-    });
-  });
-})();
-</script>
+  <p class="muted">See <a href="/tos">Terms of Service</a> for rewire, refunds, and key rules.</p>
 `, true);
-}
-
-function premiumSuccessPage() {
-  return siteShell("Payment successful", "pricing", `
-  <div class="badge">Stripe</div>
-  <h1>Payment successful!</h1>
-  <p class="sub">Your key is provisioned by the payment webhook. This page only displays it.</p>
-  <div class="card">
-    <p id="ps_status" class="muted">Looking up your payment...</p>
-    <div id="ps_ready" style="display:none">
-      <p><b>Plan:</b> <span id="ps_plan"></span></p>
-      <p style="margin-top:6px"><b>Username:</b> <span id="ps_user"></span></p>
-      <p style="margin-top:12px"><b>Your key:</b></p>
-      <p style="margin-top:6px;font-size:1.15rem;word-break:break-all"><strong id="ps_key"></strong></p>
-      <p style="margin-top:8px" class="muted"><b>Expires:</b> <span id="ps_exp"></span></p>
-    </div>
-    <p style="margin-top:16px"><a class="btn" href="/home">Back to Home</a> <a class="btn" href="/pricing">Pricing</a></p>
-  </div>
-<script>
-(function(){
-  const params = new URLSearchParams(location.search);
-  const sessionId = (params.get("session_id") || "").trim();
-  const statusEl = document.getElementById("ps_status");
-  const readyEl = document.getElementById("ps_ready");
-  if (!sessionId) {
-    statusEl.textContent = "Missing session_id. Complete checkout from /pricing.";
-    return;
-  }
-  let tries = 0;
-  async function poll() {
-    tries++;
-    try {
-      const res = await fetch("/api/premium/status?session_id=" + encodeURIComponent(sessionId));
-      const data = await res.json();
-      if (data.ok && data.status === "ready" && data.key) {
-        statusEl.textContent = "Payment successful";
-        statusEl.className = "ok";
-        document.getElementById("ps_plan").textContent = data.plan || "—";
-        document.getElementById("ps_user").textContent = data.username || "—";
-        document.getElementById("ps_key").textContent = data.key;
-        const exp = data.expires_at ? new Date(Number(data.expires_at) * 1000).toUTCString() : "—";
-        document.getElementById("ps_exp").textContent = exp;
-        readyEl.style.display = "block";
-        return;
-      }
-      if (data.status === "pending") {
-        statusEl.textContent = "Payment successful — provisioning key... (" + tries + ")";
-        if (tries < 30) setTimeout(poll, 1500);
-        else statusEl.textContent = "Still processing. Refresh this page in a moment.";
-        return;
-      }
-      statusEl.textContent = data.error || "Unable to load key status";
-      statusEl.className = "err";
-    } catch (e) {
-      statusEl.textContent = String(e);
-      statusEl.className = "err";
-      if (tries < 10) setTimeout(poll, 2000);
-    }
-  }
-  poll();
-})();
-</script>
-`);
 }
 
 function tosPage() {
@@ -1671,20 +1654,6 @@ export default {
             note: "API error → local L" + level + ": " + String(e && e.message ? e.message : e),
           });
         }
-      }
-      
-      // STRIPE (one-time payment → fixed-duration key)
-      if (request.method === "POST" && path === "/api/stripe/checkout") {
-        return await createStripeCheckout(request, env);
-      }
-      if (request.method === "POST" && path === "/api/stripe/webhook") {
-        return await handleStripeWebhook(request, env);
-      }
-      if (request.method === "GET" && path === "/api/premium/status") {
-        return await handlePremiumStatus(request, env);
-      }
-      if (request.method === "GET" && path === "/premium/success") {
-        return html(premiumSuccessPage());
       }
 
       // KEY SYSTEM
