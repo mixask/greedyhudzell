@@ -17,6 +17,7 @@ function json(data, status = 200) {
     status,
     headers: {
       "content-type": "application/json",
+      "cache-control": "no-store",
     },
   });
 }
@@ -92,16 +93,12 @@ export async function createStripeCheckout(request, env) {
   const origin = new URL(request.url).origin;
 
   const params = new URLSearchParams();
-
-  // One-time payment (fixed duration key), NOT subscription
   params.set("mode", "payment");
   params.set("managed_payments[enabled]", "false");
   params.set("line_items[0][price]", price);
   params.set("line_items[0][quantity]", "1");
-
   params.set("metadata[plan]", plan);
   params.set("metadata[username]", username);
-
   params.set(
     "success_url",
     `${origin}/premium/success?session_id={CHECKOUT_SESSION_ID}`
@@ -135,26 +132,50 @@ export async function createStripeCheckout(request, env) {
   });
 }
 
-async function verifyStripeSignature(payload, signature, secret) {
-  if (!signature || !secret) return false;
+/**
+ * Stripe webhook signature verification (Cloudflare Workers / Web Crypto).
+ * Uses raw body string; compares HMAC-SHA256 hex of `${t}.${payload}` to v1.
+ */
+async function verifyStripeSignature(payload, signatureHeader, secret) {
+  if (!signatureHeader || !secret) {
+    console.error("stripe_sig_missing", {
+      hasSig: !!signatureHeader,
+      hasSecret: !!secret,
+    });
+    return false;
+  }
 
-  const parts = signature.split(",");
+  // Dashboard paste sometimes includes trailing newline/quotes
+  const cleanSecret = String(secret).trim().replace(/^["']|["']$/g, "");
+
+  const parts = signatureHeader.split(",");
   let timestamp = null;
   const signatures = [];
 
   for (const part of parts) {
-    const [key, value] = part.split("=");
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
     if (key === "t") timestamp = value;
     if (key === "v1" && value) signatures.push(value);
   }
 
-  if (!timestamp || signatures.length === 0) return false;
+  if (!timestamp || signatures.length === 0) {
+    console.error("stripe_sig_parse_failed", { timestamp, sigCount: signatures.length });
+    return false;
+  }
 
   const timestampNumber = Number(timestamp);
-  if (!Number.isFinite(timestampNumber)) return false;
+  if (!Number.isFinite(timestampNumber)) {
+    console.error("stripe_sig_bad_timestamp", timestamp);
+    return false;
+  }
 
-  // Replay window: 5 minutes
-  if (Math.abs(Math.floor(Date.now() / 1000) - timestampNumber) > 300) {
+  // 5 minute tolerance (Stripe default)
+  const skew = Math.abs(Math.floor(Date.now() / 1000) - timestampNumber);
+  if (skew > 300) {
+    console.error("stripe_sig_replay_window", { skew });
     return false;
   }
 
@@ -162,7 +183,7 @@ async function verifyStripeSignature(payload, signature, secret) {
 
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
-    new TextEncoder().encode(secret),
+    new TextEncoder().encode(cleanSecret),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -187,12 +208,46 @@ async function verifyStripeSignature(payload, signature, secret) {
     if (difference === 0) return true;
   }
 
+  console.error("stripe_sig_mismatch", {
+    expectedLen: expected.length,
+    candidates: signatures.map((s) => s.length),
+  });
   return false;
+}
+
+async function insertKeyRow(env, { key, username, sessionId, createdAt, expiresAt, plan }) {
+  // Prefer with plan; fallback without plan if column missing
+  try {
+    await env.DB.prepare(
+      `INSERT INTO keys (
+        key, username, session_id, created_at, expires_at,
+        revoked, executed, last_execution, plan
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+    )
+      .bind(key, username, `stripe:${sessionId}`, createdAt, expiresAt, plan)
+      .run();
+    return { ok: true };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    // Missing plan column
+    if (/no such column:\s*plan/i.test(msg)) {
+      await env.DB.prepare(
+        `INSERT INTO keys (
+          key, username, session_id, created_at, expires_at,
+          revoked, executed, last_execution
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL)`
+      )
+        .bind(key, username, `stripe:${sessionId}`, createdAt, expiresAt)
+        .run();
+      return { ok: true, note: "keys.plan column missing — inserted without plan" };
+    }
+    throw err;
+  }
 }
 
 /**
  * Provision key once per Stripe checkout session_id.
- * Idempotent: duplicate webhook => no second key.
+ * Recover if payment row exists but key row is missing.
  */
 async function provisionPaidKeyFromSession(env, session) {
   const sessionId = session?.id;
@@ -200,25 +255,79 @@ async function provisionPaidKeyFromSession(env, session) {
     return { ok: false, error: "missing_session_id" };
   }
 
-  // Already processed?
-  const existing = await env.DB.prepare(
-    `SELECT key, plan, username FROM stripe_payments WHERE session_id = ? LIMIT 1`
-  )
-    .bind(sessionId)
-    .first();
+  if (session.payment_status && session.payment_status !== "paid") {
+    return { ok: false, error: "not_paid", payment_status: session.payment_status };
+  }
 
-  if (existing) {
+  let existingPayment;
+  try {
+    existingPayment = await env.DB.prepare(
+      `SELECT key, plan, username FROM stripe_payments WHERE session_id = ? LIMIT 1`
+    )
+      .bind(sessionId)
+      .first();
+  } catch (err) {
+    console.error("stripe_payments select failed", err);
     return {
-      ok: true,
-      already: true,
-      key: existing.key,
-      plan: existing.plan,
-      username: existing.username,
+      ok: false,
+      error: "d1_stripe_payments_unavailable",
+      details: String(err && err.message ? err.message : err),
     };
   }
 
-  if (session.payment_status && session.payment_status !== "paid") {
-    return { ok: false, error: "not_paid", payment_status: session.payment_status };
+  if (existingPayment) {
+    // Ensure key exists (recover partial failure)
+    let keyRow = null;
+    try {
+      keyRow = await env.DB.prepare(
+        `SELECT key FROM keys WHERE key = ? LIMIT 1`
+      )
+        .bind(existingPayment.key)
+        .first();
+    } catch (err) {
+      console.error("keys select during recover failed", err);
+      return { ok: false, error: "d1_keys_unavailable" };
+    }
+
+    if (keyRow) {
+      return {
+        ok: true,
+        already: true,
+        key: existingPayment.key,
+        plan: existingPayment.plan,
+        username: existingPayment.username,
+      };
+    }
+
+    // Payment recorded but key missing — finish provisioning
+    const plan = normalizePlan(existingPayment.plan);
+    const username = normalizeUsername(existingPayment.username);
+    if (!plan || !username) {
+      return { ok: false, error: "invalid_stored_metadata" };
+    }
+    const createdAt = nowUnix();
+    const expiresAt = createdAt + PLAN_TTL_SECONDS[plan];
+    try {
+      await insertKeyRow(env, {
+        key: existingPayment.key,
+        username,
+        sessionId,
+        createdAt,
+        expiresAt,
+        plan,
+      });
+      return {
+        ok: true,
+        recovered: true,
+        key: existingPayment.key,
+        plan,
+        username,
+        expires_at: expiresAt,
+      };
+    } catch (err) {
+      console.error("recover key insert failed", err);
+      return { ok: false, error: "db_recover_key_failed" };
+    }
   }
 
   const plan = normalizePlan(session.metadata?.plan);
@@ -238,13 +347,15 @@ async function provisionPaidKeyFromSession(env, session) {
   const key = generatePaidKey(plan);
 
   const stripeCustomerId =
-    typeof session.customer === "string" ? session.customer : session.customer?.id || null;
+    typeof session.customer === "string"
+      ? session.customer
+      : session.customer?.id || null;
   const stripePaymentIntentId =
     typeof session.payment_intent === "string"
       ? session.payment_intent
       : session.payment_intent?.id || null;
 
-  // Insert payment row first (PK = session_id) for idempotency under concurrent webhooks.
+  // Insert payment first (PK = session_id) for idempotency
   try {
     await env.DB.prepare(
       `INSERT INTO stripe_payments (
@@ -268,42 +379,45 @@ async function provisionPaidKeyFromSession(env, session) {
       )
       .run();
   } catch (err) {
-    // Race: another worker already inserted this session_id
-    const raced = await env.DB.prepare(
-      `SELECT key, plan, username FROM stripe_payments WHERE session_id = ? LIMIT 1`
-    )
-      .bind(sessionId)
-      .first();
-    if (raced) {
+    const msg = String(err && err.message ? err.message : err);
+    if (/no such table:\s*stripe_payments/i.test(msg)) {
+      console.error("stripe_payments table missing — run D1 SQL migration");
       return {
-        ok: true,
-        already: true,
-        key: raced.key,
-        plan: raced.plan,
-        username: raced.username,
+        ok: false,
+        error: "d1_missing_stripe_payments_table",
+        details: msg,
       };
     }
+    // Race: another invocation inserted
+    try {
+      const raced = await env.DB.prepare(
+        `SELECT key, plan, username FROM stripe_payments WHERE session_id = ? LIMIT 1`
+      )
+        .bind(sessionId)
+        .first();
+      if (raced) {
+        return {
+          ok: true,
+          already: true,
+          key: raced.key,
+          plan: raced.plan,
+          username: raced.username,
+        };
+      }
+    } catch (_) {}
     console.error("stripe_payments insert failed", err);
-    return { ok: false, error: "db_insert_payment_failed" };
+    return { ok: false, error: "db_insert_payment_failed", details: msg };
   }
 
-  // Store key (plan column used by existing /validate + admin)
   try {
-    await env.DB.prepare(
-      `INSERT INTO keys (
-        key,
-        username,
-        session_id,
-        created_at,
-        expires_at,
-        revoked,
-        executed,
-        last_execution,
-        plan
-      ) VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
-    )
-      .bind(key, username, `stripe:${sessionId}`, createdAt, expiresAt, plan)
-      .run();
+    await insertKeyRow(env, {
+      key,
+      username,
+      sessionId,
+      createdAt,
+      expiresAt,
+      plan,
+    });
   } catch (err) {
     console.error("keys insert failed after payment recorded", { sessionId, key, err });
     return { ok: false, error: "db_insert_key_failed", key };
@@ -333,7 +447,9 @@ export async function handleStripeWebhook(request, env) {
 
   // Raw body BEFORE JSON.parse — required for signature verification
   const payload = await request.text();
-  const signature = request.headers.get("Stripe-Signature");
+  const signature =
+    request.headers.get("Stripe-Signature") ||
+    request.headers.get("stripe-signature");
 
   const valid = await verifyStripeSignature(
     payload,
@@ -358,6 +474,17 @@ export async function handleStripeWebhook(request, env) {
       const result = await provisionPaidKeyFromSession(env, session);
       if (!result.ok) {
         console.error("provisionPaidKeyFromSession failed", result);
+        // Missing table / D1 errors — return 500 so Stripe retries after migration
+        if (
+          result.error === "d1_missing_stripe_payments_table" ||
+          result.error === "d1_stripe_payments_unavailable" ||
+          result.error === "d1_keys_unavailable" ||
+          result.error === "db_insert_payment_failed" ||
+          result.error === "db_insert_key_failed" ||
+          result.error === "db_recover_key_failed"
+        ) {
+          return json({ ok: false, error: result.error }, 500);
+        }
       }
     } catch (err) {
       console.error("webhook provision error", err);
@@ -372,58 +499,97 @@ export async function handleStripeWebhook(request, env) {
 
 /**
  * GET /api/premium/status?session_id=cs_...
- * Does NOT create keys — read-only lookup after webhook provisioning.
+ * Read-only. Never creates keys.
+ * D1 errors → JSON, not uncaught Worker exception.
  */
 export async function handlePremiumStatus(request, env) {
   if (request.method !== "GET") {
     return json({ ok: false, error: "method_not_allowed" }, 405);
   }
 
-  const url = new URL(request.url);
-  const sessionId = (url.searchParams.get("session_id") || "").trim();
+  try {
+    const url = new URL(request.url);
+    const sessionId = (url.searchParams.get("session_id") || "").trim();
 
-  if (!sessionId || sessionId.length > 200 || !/^cs_/.test(sessionId)) {
-    return json({ ok: false, error: "invalid_session_id" }, 400);
-  }
+    if (!sessionId || sessionId.length > 200 || !/^cs_[A-Za-z0-9_]+$/.test(sessionId)) {
+      return json({ ok: false, error: "invalid_session_id" }, 400);
+    }
 
-  const payment = await env.DB.prepare(
-    `SELECT session_id, key, plan, username, created_at
-     FROM stripe_payments WHERE session_id = ? LIMIT 1`
-  )
-    .bind(sessionId)
-    .first();
+    let payment;
+    try {
+      payment = await env.DB.prepare(
+        `SELECT session_id, key, plan, username, created_at
+         FROM stripe_payments WHERE session_id = ? LIMIT 1`
+      )
+        .bind(sessionId)
+        .first();
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      console.error("handlePremiumStatus D1 stripe_payments", msg);
+      if (/no such table/i.test(msg)) {
+        return json({
+          ok: false,
+          error: "d1_missing_stripe_payments_table",
+          details: "Run SQL migration for stripe_payments in D1 Console",
+        }, 503);
+      }
+      return json({
+        ok: false,
+        error: "d1_error",
+        details: msg,
+      }, 500);
+    }
 
-  if (!payment) {
+    if (!payment) {
+      return json({
+        ok: true,
+        status: "pending",
+        message: "Payment is being processed",
+      });
+    }
+
+    let keyRow;
+    try {
+      keyRow = await env.DB.prepare(
+        `SELECT key, username, plan, expires_at, revoked, created_at
+         FROM keys WHERE key = ? LIMIT 1`
+      )
+        .bind(payment.key)
+        .first();
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      console.error("handlePremiumStatus D1 keys", msg);
+      return json({
+        ok: false,
+        error: "d1_error",
+        details: msg,
+      }, 500);
+    }
+
+    if (!keyRow) {
+      return json({
+        ok: true,
+        status: "pending",
+        message: "Key provisioning in progress",
+      });
+    }
+
     return json({
       ok: true,
-      status: "pending",
-      message: "Payment is being processed",
+      status: "ready",
+      key: keyRow.key,
+      plan: keyRow.plan || payment.plan,
+      username: keyRow.username || payment.username,
+      expires_at: keyRow.expires_at,
+      created_at: keyRow.created_at,
+      revoked: keyRow.revoked === 1,
     });
-  }
-
-  const keyRow = await env.DB.prepare(
-    `SELECT key, username, plan, expires_at, revoked, created_at
-     FROM keys WHERE key = ? LIMIT 1`
-  )
-    .bind(payment.key)
-    .first();
-
-  if (!keyRow) {
+  } catch (err) {
+    console.error("handlePremiumStatus unexpected", err);
     return json({
-      ok: true,
-      status: "pending",
-      message: "Key provisioning in progress",
-    });
+      ok: false,
+      error: "internal_error",
+      details: String(err && err.message ? err.message : err),
+    }, 500);
   }
-
-  return json({
-    ok: true,
-    status: "ready",
-    key: keyRow.key,
-    plan: keyRow.plan || payment.plan,
-    username: keyRow.username || payment.username,
-    expires_at: keyRow.expires_at,
-    created_at: keyRow.created_at,
-    revoked: keyRow.revoked === 1,
-  });
 }
