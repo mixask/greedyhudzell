@@ -14,9 +14,8 @@
 
   "vars": {
     "SITE_NAME": "GREEDY HUDZELL"
-  }
-}
-{
+  },
+
   "observability": {
     "enabled": false,
     "head_sampling_rate": 1,
