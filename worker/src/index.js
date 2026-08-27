@@ -5,7 +5,7 @@
  * - Lua proxies + Obfuscator
  *
  * Bindings: DB (D1)
- * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional)
+ * Secrets: ADMIN_SECRET, ROTATION_SECRET, LUAOBF_API_KEY (optional), STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
  * Vars: SITE_NAME
  */
 import {
@@ -1426,15 +1426,59 @@ function pricingPage() {
       <a class="btn" href="${FREE_KEY_LINK}" target="_blank" rel="noopener">Get free key</a></div>
     <div class="pcard"><h3>Week</h3><div class="amt">$3.99</div>
       <ul><li>7 days</li><li>Rewire</li></ul>
-      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+      <button class="btn" type="button" data-plan="week">Buy</button></div>
     <div class="pcard feat"><h3>Month</h3><div class="amt">$6.99</div>
       <ul><li>30 days</li><li>Rewire</li><li>Popular</li></ul>
-      <a class="btn btn-gold" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+      <button class="btn btn-gold" type="button" data-plan="month">Buy</button></div>
     <div class="pcard"><h3>Year</h3><div class="amt">$12.99</div>
       <ul><li>365 days</li><li>Rewire</li></ul>
-      <a class="btn" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Buy</a></div>
+      <button class="btn" type="button" data-plan="year">Buy</button></div>
   </div>
+  <p id="stripe-status" class="muted" style="margin-top:14px;text-align:center"></p>
+<script>
+(function(){
+  const status = document.getElementById("stripe-status");
+  async function startCheckout(plan, btn) {
+    if (status) status.textContent = "Redirecting to Stripe...";
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan })
+      });
+      const data = await res.json();
+      if (!data.ok || !data.url) {
+        if (status) status.textContent = data.error || "Checkout failed";
+        if (btn) btn.disabled = false;
+        return;
+      }
+      window.location.href = data.url;
+    } catch (e) {
+      if (status) status.textContent = String(e);
+      if (btn) btn.disabled = false;
+    }
+  }
+  document.querySelectorAll("[data-plan]").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      startCheckout(btn.getAttribute("data-plan"), btn);
+    });
+  });
+})();
+</script>
 `, true);
+}
+
+function premiumSuccessPage() {
+  return siteShell("Payment successful", "pricing", `
+  <div class="badge">Stripe</div>
+  <h1>Payment successful!</h1>
+  <p class="sub">Your Premium subscription is being processed.</p>
+  <div class="card muted">
+    <p>You will receive access shortly. Premium is not granted on this page automatically.</p>
+    <p style="margin-top:12px"><a class="btn" href="/home">Back to Home</a> <a class="btn" href="/pricing">Pricing</a></p>
+  </div>
+`);
 }
 
 function tosPage() {
@@ -1557,6 +1601,17 @@ export default {
         }
       }
       
+      // STRIPE
+      if (request.method === "POST" && path === "/api/stripe/checkout") {
+        return await createStripeCheckout(request, env);
+      }
+      if (request.method === "POST" && path === "/api/stripe/webhook") {
+        return await handleStripeWebhook(request, env);
+      }
+      if (request.method === "GET" && path === "/premium/success") {
+        return html(premiumSuccessPage());
+      }
+
       // KEY SYSTEM
       if (request.method === "GET" && path.startsWith("/get-key/token/")) {
         const token = decodeURIComponent(path.slice("/get-key/token/".length));
