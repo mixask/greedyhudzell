@@ -48,8 +48,11 @@ export async function createStripeCheckout(request, env) {
   const params = new URLSearchParams();
 
   params.set("mode", "subscription");
+
   params.set("line_items[0][price]", price);
   params.set("line_items[0][quantity]", "1");
+
+  params.set("managed_payments[enabled]", "false");
 
   params.set(
     "success_url",
@@ -257,4 +260,4 @@ export async function handleStripeWebhook(request, env) {
   return json({
     received: true,
   });
-}
+}с
