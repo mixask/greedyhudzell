@@ -11,6 +11,7 @@
 import {
   createStripeCheckout,
   handleStripeWebhook,
+  handlePremiumStatus,
 } from "./stripe.js";
 
 const corsHeaders = {
@@ -1419,7 +1420,12 @@ function pricingPage() {
   return siteShell("Pricing", "pricing", `
   <div class="badge">USD</div>
   <h1>Pricing</h1>
-  <p class="sub">Paid plans include account rewire. Free does not.</p>
+  <p class="sub">Paid plans include account rewire. Free does not. One-time payment → fixed key duration.</p>
+  <div class="card" style="margin-bottom:14px">
+    <label class="f">Roblox username (required for paid plans)</label>
+    <input id="paid_username" maxlength="20" placeholder="Not display name" autocomplete="off"/>
+    <p class="muted" style="margin-top:8px">Key will be bound to this username. Use the same name in the loader.</p>
+  </div>
   <div class="price-grid">
     <div class="pcard"><h3>Free</h3><div class="amt">$0 <span class="muted">/24h</span></div>
       <ul><li>Full access</li><li>1 username</li><li>No rewire</li></ul>
@@ -1438,14 +1444,25 @@ function pricingPage() {
 <script>
 (function(){
   const status = document.getElementById("stripe-status");
+  const userInput = document.getElementById("paid_username");
+  function validUsername(u) {
+    u = (u || "").trim();
+    return u.length >= 3 && u.length <= 20 && /^[A-Za-z0-9_]+$/.test(u);
+  }
   async function startCheckout(plan, btn) {
+    const username = (userInput.value || "").trim();
+    if (!validUsername(username)) {
+      if (status) status.textContent = "Enter a valid Roblox username (3-20: letters, numbers, _).";
+      userInput.focus();
+      return;
+    }
     if (status) status.textContent = "Redirecting to Stripe...";
     if (btn) btn.disabled = true;
     try {
       const res = await fetch("/api/stripe/checkout", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan })
+        body: JSON.stringify({ plan, username })
       });
       const data = await res.json();
       if (!data.ok || !data.url) {
@@ -1477,11 +1494,62 @@ function premiumSuccessPage() {
   return siteShell("Payment successful", "pricing", `
   <div class="badge">Stripe</div>
   <h1>Payment successful!</h1>
-  <p class="sub">Your Premium subscription is being processed.</p>
-  <div class="card muted">
-    <p>You will receive access shortly. Premium is not granted on this page automatically.</p>
-    <p style="margin-top:12px"><a class="btn" href="/home">Back to Home</a> <a class="btn" href="/pricing">Pricing</a></p>
+  <p class="sub">Your key is provisioned by the payment webhook. This page only displays it.</p>
+  <div class="card">
+    <p id="ps_status" class="muted">Looking up your payment...</p>
+    <div id="ps_ready" style="display:none">
+      <p><b>Plan:</b> <span id="ps_plan"></span></p>
+      <p style="margin-top:6px"><b>Username:</b> <span id="ps_user"></span></p>
+      <p style="margin-top:12px"><b>Your key:</b></p>
+      <p style="margin-top:6px;font-size:1.15rem;word-break:break-all"><strong id="ps_key"></strong></p>
+      <p style="margin-top:8px" class="muted"><b>Expires:</b> <span id="ps_exp"></span></p>
+    </div>
+    <p style="margin-top:16px"><a class="btn" href="/home">Back to Home</a> <a class="btn" href="/pricing">Pricing</a></p>
   </div>
+<script>
+(function(){
+  const params = new URLSearchParams(location.search);
+  const sessionId = (params.get("session_id") || "").trim();
+  const statusEl = document.getElementById("ps_status");
+  const readyEl = document.getElementById("ps_ready");
+  if (!sessionId) {
+    statusEl.textContent = "Missing session_id. Complete checkout from /pricing.";
+    return;
+  }
+  let tries = 0;
+  async function poll() {
+    tries++;
+    try {
+      const res = await fetch("/api/premium/status?session_id=" + encodeURIComponent(sessionId));
+      const data = await res.json();
+      if (data.ok && data.status === "ready" && data.key) {
+        statusEl.textContent = "Payment successful";
+        statusEl.className = "ok";
+        document.getElementById("ps_plan").textContent = data.plan || "—";
+        document.getElementById("ps_user").textContent = data.username || "—";
+        document.getElementById("ps_key").textContent = data.key;
+        const exp = data.expires_at ? new Date(Number(data.expires_at) * 1000).toUTCString() : "—";
+        document.getElementById("ps_exp").textContent = exp;
+        readyEl.style.display = "block";
+        return;
+      }
+      if (data.status === "pending") {
+        statusEl.textContent = "Payment successful — provisioning key... (" + tries + ")";
+        if (tries < 30) setTimeout(poll, 1500);
+        else statusEl.textContent = "Still processing. Refresh this page in a moment.";
+        return;
+      }
+      statusEl.textContent = data.error || "Unable to load key status";
+      statusEl.className = "err";
+    } catch (e) {
+      statusEl.textContent = String(e);
+      statusEl.className = "err";
+      if (tries < 10) setTimeout(poll, 2000);
+    }
+  }
+  poll();
+})();
+</script>
 `);
 }
 
@@ -1605,12 +1673,15 @@ export default {
         }
       }
       
-      // STRIPE
+      // STRIPE (one-time payment → fixed-duration key)
       if (request.method === "POST" && path === "/api/stripe/checkout") {
         return await createStripeCheckout(request, env);
       }
       if (request.method === "POST" && path === "/api/stripe/webhook") {
         return await handleStripeWebhook(request, env);
+      }
+      if (request.method === "GET" && path === "/api/premium/status") {
+        return await handlePremiumStatus(request, env);
       }
       if (request.method === "GET" && path === "/premium/success") {
         return html(premiumSuccessPage());
