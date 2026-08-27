@@ -260,4 +260,4 @@ export async function handleStripeWebhook(request, env) {
   return json({
     received: true,
   });
-}с
+}
