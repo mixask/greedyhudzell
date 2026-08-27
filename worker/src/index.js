@@ -498,6 +498,92 @@ async function handleAdminRenew(request, env) {
     plan: record.plan || "day",
   });
 }
+
+/** Rewire username — GH-PAID-* keys only */
+async function handleAdminRewire(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!key) return json({ success: false, reason: "missing_key" }, 400);
+  if (username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
+    return json({ success: false, reason: "invalid_username" }, 400);
+  }
+  if (!key.startsWith("GH-PAID-")) {
+    return json({ success: false, reason: "rewire_only_paid", details: "Only GH-PAID-* keys can be rewired" }, 400);
+  }
+
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ success: false, reason: "key_not_found" }, 404);
+  if (record.revoked === 1) return json({ success: false, reason: "revoked" }, 400);
+  if (Number(record.expires_at) <= now()) return json({ success: false, reason: "expired" }, 400);
+
+  const previous = record.username;
+  await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+
+  return json({
+    success: true,
+    key,
+    previous_username: previous,
+    username,
+    plan: record.plan || "paid",
+    expires_at: record.expires_at,
+  });
+}
+
+/** Key issuance stats (day / week / totals) */
+async function handleAdminStats(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  const t = now();
+  const dayAgo = t - 86400;
+  const weekAgo = t - 7 * 86400;
+
+  const row = async (sql, binds = []) => {
+    const r = await env.DB.prepare(sql).bind(...binds).first();
+    return Number(r && r.c != null ? r.c : 0);
+  };
+
+  const total = await row(`SELECT COUNT(*) AS c FROM keys`);
+  const active = await row(
+    `SELECT COUNT(*) AS c FROM keys WHERE revoked = 0 AND expires_at > ?`,
+    [t]
+  );
+  const revoked = await row(`SELECT COUNT(*) AS c FROM keys WHERE revoked = 1`);
+  const day = await row(`SELECT COUNT(*) AS c FROM keys WHERE created_at >= ?`, [dayAgo]);
+  const week = await row(`SELECT COUNT(*) AS c FROM keys WHERE created_at >= ?`, [weekAgo]);
+  const paid = await row(`SELECT COUNT(*) AS c FROM keys WHERE key LIKE 'GH-PAID-%'`);
+  const paidActive = await row(
+    `SELECT COUNT(*) AS c FROM keys WHERE key LIKE 'GH-PAID-%' AND revoked = 0 AND expires_at > ?`,
+    [t]
+  );
+  const dayPaid = await row(
+    `SELECT COUNT(*) AS c FROM keys WHERE created_at >= ? AND key LIKE 'GH-PAID-%'`,
+    [dayAgo]
+  );
+  const weekPaid = await row(
+    `SELECT COUNT(*) AS c FROM keys WHERE created_at >= ? AND key LIKE 'GH-PAID-%'`,
+    [weekAgo]
+  );
+
+  return json({
+    success: true,
+    now: t,
+    total,
+    active,
+    revoked,
+    issued_day: day,
+    issued_week: week,
+    paid_total: paid,
+    paid_active: paidActive,
+    paid_day: dayPaid,
+    paid_week: weekPaid,
+  });
+}
 /* ===================== LUA PROXY ===================== */
 async function proxyGithub(file) {
   const response = await fetch(`${GH}/${file}`, { cf: { cacheTtl: 0, cacheEverything: false } });
@@ -1335,20 +1421,27 @@ ${bodyHtml}
 
 function fmtSunc(v) {
   if (v == null || v === "") return "—";
-  if (typeof v === "number" || typeof v === "boolean" || typeof v === "string") return String(v);
-  if (typeof v === "object") {
-    if (v.percentage != null) return String(v.percentage) + (String(v.percentage).includes("%") ? "" : "%");
-    if (v.percent != null) return String(v.percent) + "%";
-    if (v.sUNC != null) return fmtSunc(v.sUNC);
-    if (v.sunc != null) return fmtSunc(v.sunc);
-    if (v.score != null) return String(v.score);
-    try {
-      return JSON.stringify(v);
-    } catch {
-      return "—";
-    }
+  if (typeof v === "number" || typeof v === "boolean") {
+    return String(v) + (typeof v === "number" && !String(v).includes("%") ? "%" : "");
   }
-  return String(v);
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return "—";
+    if (/^\d+(\.\d+)?$/.test(t)) return t + "%";
+    return t;
+  }
+  if (typeof v === "object") {
+    // weao.xyz: real score is suncPercentage / uncPercentage; `sunc` is metadata keys only
+    if (v.suncPercentage != null) return fmtSunc(v.suncPercentage);
+    if (v.uncPercentage != null) return fmtSunc(v.uncPercentage);
+    if (v.percentage != null) return fmtSunc(v.percentage);
+    if (v.percent != null) return fmtSunc(v.percent);
+    if (v.score != null && typeof v.score !== "object") return fmtSunc(v.score);
+    // ignore suncScrap / suncKey blobs
+    if (v.suncScrap != null || v.suncKey != null) return "—";
+    return "—";
+  }
+  return "—";
 }
 
 function homePage() {
@@ -1428,21 +1521,39 @@ function executorsPage() {
   <p class="sub">Best-effort list. Prefer tools with HTTP, files, and queue_on_teleport.</p>
   <div class="card muted" id="ex_out">Loading…</div>
 <script>
-function fmtSunc(v){
+function fmtPct(v){
   if(v==null||v==="")return "—";
-  if(typeof v==="number"||typeof v==="boolean"||typeof v==="string")return String(v);
-  if(typeof v==="object"){
-    if(v.percentage!=null)return String(v.percentage)+(String(v.percentage).includes("%")?"":"%");
-    if(v.percent!=null)return String(v.percent)+"%";
-    if(v.sUNC!=null)return fmtSunc(v.sUNC);
-    if(v.sunc!=null)return fmtSunc(v.sunc);
-    if(v.score!=null)return String(v.score);
-    if(v.version!=null&&v.updateStatus!=null)return String(v.updateStatus);
-    try{return JSON.stringify(v);}catch(e){return "—";}
+  if(typeof v==="number")return v+"%";
+  if(typeof v==="boolean")return v?"yes":"no";
+  if(typeof v==="string"){
+    var t=v.trim();
+    if(!t)return "—";
+    if(/^\d+(\.\d+)?$/.test(t))return t+"%";
+    return t;
   }
-  return String(v);
+  return "—";
 }
-function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+function pickSunc(x){
+  if(!x||typeof x!=="object")return "—";
+  // weao.xyz uses suncPercentage; sunc field is metadata keys only, not a score
+  if(x.suncPercentage!=null)return fmtPct(x.suncPercentage);
+  if(x.uncPercentage!=null)return fmtPct(x.uncPercentage);
+  if(typeof x.sunc==="number"||typeof x.sunc==="string")return fmtPct(x.sunc);
+  if(typeof x.sUNC==="number"||typeof x.sUNC==="string")return fmtPct(x.sUNC);
+  if(x.percentage!=null)return fmtPct(x.percentage);
+  if(x.percent!=null)return fmtPct(x.percent);
+  if(x.unc!=null&&(typeof x.unc==="number"||typeof x.unc==="string"))return fmtPct(x.unc);
+  return "—";
+}
+function fmtStatus(x){
+  if(x.updateStatus===true||x.updateStatus==="true"||x.updateStatus==="Updated")return "Updated";
+  if(x.updateStatus===false||x.updateStatus==="false")return "Not updated";
+  if(x.updateStatus!=null&&typeof x.updateStatus!=="object")return String(x.updateStatus);
+  if(x.status!=null&&typeof x.status!=="object")return String(x.status);
+  if(x.updatedDate)return String(x.updatedDate);
+  return "—";
+}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 (async function(){
   const el=document.getElementById("ex_out");
   try{
@@ -1452,13 +1563,14 @@ function esc(s){return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").repl
     const list=Array.isArray(data)?data:(data.exploits||data.data||data.results||[]);
     if(!list.length){el.textContent="Empty list from weao.xyz";return;}
     const rows=list.slice(0,50).map(function(x){
-      const name=x.name||x.title||x.executor||"?";
-      const st=x.updateStatus!=null?x.updateStatus:(x.status!=null?x.status:(x.updated!=null?x.updated:""));
-      const sunc=fmtSunc(x.sunc!=null?x.sunc:(x.sUNC!=null?x.sUNC:(x.percentage!=null?x.percentage:x.unc)));
-      return "<tr><td>"+esc(name)+"</td><td>"+esc(st)+"</td><td>"+esc(sunc)+"</td></tr>";
+      const name=x.title||x.name||x.executor||"?";
+      const st=fmtStatus(x);
+      const sunc=pickSunc(x);
+      const unc=x.uncPercentage!=null?fmtPct(x.uncPercentage):"—";
+      return "<tr><td>"+esc(name)+"</td><td>"+esc(st)+"</td><td>"+esc(sunc)+(unc!=="—"&&unc!==sunc?" · UNC "+esc(unc):"")+"</td></tr>";
     }).join("");
     el.className="card";
-    el.innerHTML="<table><thead><tr><th>Executor</th><th>Status</th><th>sUNC / info</th></tr></thead><tbody>"+rows+"</tbody></table>";
+    el.innerHTML="<table><thead><tr><th>Executor</th><th>Status</th><th>sUNC %</th></tr></thead><tbody>"+rows+"</tbody></table>";
   }catch(e){
     el.textContent="Could not load weao.xyz ("+e+"). Use Discord recommendations.";
   }
@@ -1674,6 +1786,8 @@ export default {
       if (request.method === "POST" && path === "/admin/generate") return await handleAdminGenerate(request, env);
       if (request.method === "POST" && path === "/admin/renew") return await handleAdminRenew(request, env);
       if (request.method === "POST" && path === "/admin/revoke") return await handleAdminRevoke(request, env);
+      if (request.method === "POST" && path === "/admin/rewire") return await handleAdminRewire(request, env);
+      if (request.method === "GET" && path === "/admin/stats") return await handleAdminStats(request, env);
       const adminKeyMatch = path.match(/^\/admin\/key\/(.+)$/);
       if (request.method === "GET" && adminKeyMatch) {
         return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
