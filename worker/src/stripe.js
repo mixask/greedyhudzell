@@ -1,9 +1,9 @@
 const STRIPE_API = "https://api.stripe.com/v1";
 
 export const STRIPE_PRICES = {
-  week: "price_1U8mnb1OYiWwnfPTymLWHtdX",
-  month: "price_1U8moZ1OYiWwnfPTqwhQrtjp",
-  year: "price_1U8mpO1OYiWwnfPTQQRLzXAl",
+  week: "price_1U96rd1OYiWwnfPTIescm07j",
+  month: "price_1U96uE1OYiWwnfPT2CZ5sz6p",
+  year: "price_1U96uS1OYiWwnfPTwND7oatG",
 };
 
 const PLAN_TTL_SECONDS = {
@@ -95,6 +95,7 @@ export async function createStripeCheckout(request, env) {
 
   // One-time payment (fixed duration key), NOT subscription
   params.set("mode", "payment");
+  params.set("managed_payments[enabled]", "false");
   params.set("line_items[0][price]", price);
   params.set("line_items[0][quantity]", "1");
 
