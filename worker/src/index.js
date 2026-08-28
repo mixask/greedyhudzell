@@ -601,7 +601,6 @@ async function robloxUserIdFromUsername(username) {
     Accept: "application/json",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   };
-  // 1) primary: usernames/to-ids
   try {
     const res = await fetch("https://users.roblox.com/v1/usernames/to-ids", {
       method: "POST",
@@ -614,6 +613,7 @@ async function robloxUserIdFromUsername(username) {
     const text = await res.text();
     let data = null;
     try { data = JSON.parse(text); } catch (_) {}
+    if (res.status === 429) return { ok: false, reason: "roblox_users_http_429" };
     if (res.ok && data) {
       const row = (data.data || []).find((x) => {
         const a = String(x.requestedUsername || "").toLowerCase();
@@ -628,12 +628,11 @@ async function robloxUserIdFromUsername(username) {
         return { ok: false, reason: "username_not_found" };
       }
     } else {
-      console.error("to-ids status", res.status, text.slice(0, 200));
+      console.error("to-ids status", res.status, (text || "").slice(0, 200));
     }
   } catch (e) {
     console.error("users.to-ids", e);
   }
-  // 2) fallback: search
   try {
     const q = encodeURIComponent(username);
     const res2 = await fetch(
@@ -648,6 +647,7 @@ async function robloxUserIdFromUsername(username) {
     const text2 = await res2.text();
     let data2 = null;
     try { data2 = JSON.parse(text2); } catch (_) {}
+    if (res2.status === 429) return { ok: false, reason: "roblox_users_http_429" };
     if (res2.ok && data2) {
       const row2 = (data2.data || []).find(
         (x) => String(x.name || "").toLowerCase() === username.toLowerCase()
@@ -663,7 +663,6 @@ async function robloxUserIdFromUsername(username) {
     return { ok: false, reason: "roblox_users_network" };
   }
 }
-
 async function ownsGamePass(userId, gamePassId) {
   const url =
     `https://inventory.roblox.com/v1/users/${encodeURIComponent(userId)}` +
@@ -675,6 +674,7 @@ async function ownsGamePass(userId, gamePassId) {
     },
     cf: { cacheTtl: 0, cacheEverything: false },
   });
+  if (res.status === 429) return { ok: false, reason: "inventory_http_429" };
   if (res.status === 403) return { ok: false, reason: "inventory_private" };
   if (res.status === 404) return { ok: true, owned: false };
   if (!res.ok) return { ok: false, reason: "inventory_http_" + res.status };
@@ -707,8 +707,45 @@ async function handleRedeemGamepass(request, env) {
     }, 400);
   }
   const gamepassId = GAMEPASS_BY_PLAN[plan];
+  // Already redeemed? D1 only — avoids Roblox 429 on repeat
+  const byName = await env.DB.prepare(
+    `SELECT key_value, plan, user_id FROM pass_redemptions
+     WHERE lower(username) = lower(?) AND gamepass_id = ?
+     LIMIT 1`
+  )
+    .bind(username, gamepassId)
+    .first();
+  if (byName) {
+    return json({
+      success: true,
+      already_redeemed: true,
+      key: byName.key_value,
+      plan: byName.plan,
+      message: "This Game Pass was already redeemed. Showing existing key.",
+    });
+  }
   const user = await robloxUserIdFromUsername(username);
-  if (!user.ok) return json({ success: false, reason: user.reason }, 400);
+  if (!user.ok) {
+    const msg = String(user.reason || "").includes("429")
+      ? "Roblox rate limit. Wait 1-2 minutes and try again."
+      : undefined;
+    return json({ success: false, reason: user.reason, message: msg }, 400);
+  }
+  const byId = await env.DB.prepare(
+    `SELECT key_value, plan FROM pass_redemptions
+     WHERE user_id = ? AND gamepass_id = ? LIMIT 1`
+  )
+    .bind(user.userId, gamepassId)
+    .first();
+  if (byId) {
+    return json({
+      success: true,
+      already_redeemed: true,
+      key: byId.key_value,
+      plan: byId.plan,
+      message: "This Game Pass was already redeemed. Showing existing key.",
+    });
+  }
   const own = await ownsGamePass(user.userId, gamepassId);
   if (!own.ok) {
     return json({
@@ -717,7 +754,9 @@ async function handleRedeemGamepass(request, env) {
       message:
         own.reason === "inventory_private"
           ? "Inventory is private. Set Who can see my inventory = Everyone, wait 1-2 min, retry."
-          : "Could not check Game Pass ownership.",
+          : String(own.reason).includes("429")
+            ? "Roblox rate limit. Wait 1-2 minutes and try again."
+            : "Could not check Game Pass ownership.",
     }, 400);
   }
   if (!own.owned) {
@@ -727,21 +766,6 @@ async function handleRedeemGamepass(request, env) {
       message: "Game Pass not found on this account. Buy it, wait ~30s, retry.",
       store: GAMEPASS_STORE[plan],
     }, 404);
-  }
-  const existing = await env.DB.prepare(
-    `SELECT key_value, plan, created_at FROM pass_redemptions
-     WHERE user_id = ? AND gamepass_id = ? LIMIT 1`
-  )
-    .bind(user.userId, gamepassId)
-    .first();
-  if (existing) {
-    return json({
-      success: true,
-      already_redeemed: true,
-      key: existing.key_value,
-      plan: existing.plan,
-      message: "This Game Pass was already redeemed. Showing existing key.",
-    });
   }
   const key = generateKey();
   const timestamp = now();
