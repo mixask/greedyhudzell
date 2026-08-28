@@ -596,25 +596,83 @@ async function handleAdminStats(request, env) {
 }
 
 async function robloxUserIdFromUsername(username) {
-  const res = await fetch("https://users.roblox.com/v1/usernames/to-ids", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
-  });
-  if (!res.ok) return { ok: false, reason: "roblox_users_http" };
-  const data = await res.json();
-  const row = (data.data || []).find(
-    (x) => String(x.name || "").toLowerCase() === username.toLowerCase()
-  );
-  if (!row || row.id == null) return { ok: false, reason: "username_not_found" };
-  return { ok: true, userId: String(row.id), name: row.name || username };
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  };
+  // 1) primary: usernames/to-ids
+  try {
+    const res = await fetch("https://users.roblox.com/v1/usernames/to-ids", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        usernames: [username],
+        excludeBannedUsers: false,
+      }),
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) {}
+    if (res.ok && data) {
+      const row = (data.data || []).find((x) => {
+        const a = String(x.requestedUsername || "").toLowerCase();
+        const b = String(x.name || "").toLowerCase();
+        const u = username.toLowerCase();
+        return a === u || b === u;
+      });
+      if (row && row.id != null) {
+        return { ok: true, userId: String(row.id), name: row.name || username };
+      }
+      if (Array.isArray(data.data) && data.data.length === 0) {
+        return { ok: false, reason: "username_not_found" };
+      }
+    } else {
+      console.error("to-ids status", res.status, text.slice(0, 200));
+    }
+  } catch (e) {
+    console.error("users.to-ids", e);
+  }
+  // 2) fallback: search
+  try {
+    const q = encodeURIComponent(username);
+    const res2 = await fetch(
+      `https://users.roblox.com/v1/users/search?keyword=${q}&limit=10`,
+      {
+        headers: {
+          Accept: "application/json",
+          "User-Agent": headers["User-Agent"],
+        },
+      }
+    );
+    const text2 = await res2.text();
+    let data2 = null;
+    try { data2 = JSON.parse(text2); } catch (_) {}
+    if (res2.ok && data2) {
+      const row2 = (data2.data || []).find(
+        (x) => String(x.name || "").toLowerCase() === username.toLowerCase()
+      );
+      if (row2 && row2.id != null) {
+        return { ok: true, userId: String(row2.id), name: row2.name || username };
+      }
+      return { ok: false, reason: "username_not_found" };
+    }
+    return { ok: false, reason: "roblox_users_http_" + res2.status };
+  } catch (e) {
+    console.error("users.search", e);
+    return { ok: false, reason: "roblox_users_network" };
+  }
 }
+
 async function ownsGamePass(userId, gamePassId) {
   const url =
     `https://inventory.roblox.com/v1/users/${encodeURIComponent(userId)}` +
     `/items/GamePass/${encodeURIComponent(gamePassId)}`;
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
     cf: { cacheTtl: 0, cacheEverything: false },
   });
   if (res.status === 403) return { ok: false, reason: "inventory_private" };
