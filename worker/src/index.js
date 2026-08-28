@@ -34,6 +34,10 @@ const GAMEPASS_STORE = {
   month: "https://www.roblox.com/game-pass/1965054742",
   year: "https://www.roblox.com/game-pass/1966320456",
 };
+const DISCORD_REDEEM_CHANNEL = "https://discord.com/channels/1422222409846620201/1448630361390055454";
+const REDEEM_SUPPORT_HINT =
+  "If you bought the Game Pass but could not redeem it, write in Discord: https://discord.com/channels/1422222409846620201/1448630361390055454";
+
 const GH = "https://raw.githubusercontent.com/mixask/GH/main";
 const LUAOBF_NEW = "https://luaobfuscator.com/api/obfuscator/newscript";
 const LUAOBF_RUN = "https://luaobfuscator.com/api/obfuscator/obfuscate";
@@ -688,26 +692,43 @@ async function handleRedeemGamepass(request, env) {
   try {
     body = await request.json();
   } catch {
-    return json({ success: false, reason: "invalid_json" }, 400);
+    return json({
+      success: false,
+      reason: "invalid_json",
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
+    }, 400);
   }
   const plan = typeof body.plan === "string" ? body.plan.trim().toLowerCase() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
   const inventoryPublic = body.inventory_public === true || body.inventoryPublic === true;
   if (!GAMEPASS_BY_PLAN[plan]) {
-    return json({ success: false, reason: "invalid_plan", allowed: Object.keys(GAMEPASS_BY_PLAN) }, 400);
+    return json({
+      success: false,
+      reason: "invalid_plan",
+      allowed: Object.keys(GAMEPASS_BY_PLAN),
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
+    }, 400);
   }
   if (!username || username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
-    return json({ success: false, reason: "invalid_username" }, 400);
+    return json({
+      success: false,
+      reason: "invalid_username",
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
+    }, 400);
   }
   if (!inventoryPublic) {
     return json({
       success: false,
       reason: "inventory_checkbox_required",
       message: "Set Roblox inventory to Everyone and check the box.",
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
     }, 400);
   }
   const gamepassId = GAMEPASS_BY_PLAN[plan];
-  // Already redeemed? D1 only — avoids Roblox 429 on repeat
   const byName = await env.DB.prepare(
     `SELECT key_value, plan, user_id FROM pass_redemptions
      WHERE lower(username) = lower(?) AND gamepass_id = ?
@@ -728,8 +749,14 @@ async function handleRedeemGamepass(request, env) {
   if (!user.ok) {
     const msg = String(user.reason || "").includes("429")
       ? "Roblox rate limit. Wait 1-2 minutes and try again."
-      : undefined;
-    return json({ success: false, reason: user.reason, message: msg }, 400);
+      : "Could not resolve Roblox username.";
+    return json({
+      success: false,
+      reason: user.reason,
+      message: msg,
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
+    }, 400);
   }
   const byId = await env.DB.prepare(
     `SELECT key_value, plan FROM pass_redemptions
@@ -748,15 +775,18 @@ async function handleRedeemGamepass(request, env) {
   }
   const own = await ownsGamePass(user.userId, gamepassId);
   if (!own.ok) {
+    let msg = "Could not check Game Pass ownership.";
+    if (own.reason === "inventory_private") {
+      msg = "Inventory is private. Set Who can see my inventory = Everyone, wait 1-2 min, retry.";
+    } else if (String(own.reason).includes("429")) {
+      msg = "Roblox rate limit. Wait 1-2 minutes and try again.";
+    }
     return json({
       success: false,
       reason: own.reason,
-      message:
-        own.reason === "inventory_private"
-          ? "Inventory is private. Set Who can see my inventory = Everyone, wait 1-2 min, retry."
-          : String(own.reason).includes("429")
-            ? "Roblox rate limit. Wait 1-2 minutes and try again."
-            : "Could not check Game Pass ownership.",
+      message: msg,
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
     }, 400);
   }
   if (!own.owned) {
@@ -765,6 +795,8 @@ async function handleRedeemGamepass(request, env) {
       reason: "not_owned",
       message: "Game Pass not found on this account. Buy it, wait ~30s, retry.",
       store: GAMEPASS_STORE[plan],
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
     }, 404);
   }
   const key = generateKey();
@@ -796,7 +828,13 @@ async function handleRedeemGamepass(request, env) {
       });
     }
     console.error("redeem insert", e);
-    return json({ success: false, reason: "db_error" }, 500);
+    return json({
+      success: false,
+      reason: "db_error",
+      message: "Database error while creating key.",
+      support: REDEEM_SUPPORT_HINT,
+      discord: DISCORD_REDEEM_CHANNEL,
+    }, 500);
   }
   return json({
     success: true,
