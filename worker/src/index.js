@@ -24,6 +24,16 @@ const PLAN_TTL = {
 function planTtl(plan) {
   return PLAN_TTL[plan] || PLAN_TTL.day;
 }
+const GAMEPASS_BY_PLAN = {
+  week: "1963350769",
+  month: "1965054742",
+  year: "1966320456",
+};
+const GAMEPASS_STORE = {
+  week: "https://www.roblox.com/game-pass/1963350769",
+  month: "https://www.roblox.com/game-pass/1965054742",
+  year: "https://www.roblox.com/game-pass/1966320456",
+};
 const GH = "https://raw.githubusercontent.com/mixask/GH/main";
 const LUAOBF_NEW = "https://luaobfuscator.com/api/obfuscator/newscript";
 const LUAOBF_RUN = "https://luaobfuscator.com/api/obfuscator/obfuscate";
@@ -584,6 +594,138 @@ async function handleAdminStats(request, env) {
     paid_week: weekPaid,
   });
 }
+
+async function robloxUserIdFromUsername(username) {
+  const res = await fetch("https://users.roblox.com/v1/usernames/to-ids", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ usernames: [username], excludeBannedUsers: true }),
+  });
+  if (!res.ok) return { ok: false, reason: "roblox_users_http" };
+  const data = await res.json();
+  const row = (data.data || []).find(
+    (x) => String(x.name || "").toLowerCase() === username.toLowerCase()
+  );
+  if (!row || row.id == null) return { ok: false, reason: "username_not_found" };
+  return { ok: true, userId: String(row.id), name: row.name || username };
+}
+async function ownsGamePass(userId, gamePassId) {
+  const url =
+    `https://inventory.roblox.com/v1/users/${encodeURIComponent(userId)}` +
+    `/items/GamePass/${encodeURIComponent(gamePassId)}`;
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  if (res.status === 403) return { ok: false, reason: "inventory_private" };
+  if (res.status === 404) return { ok: true, owned: false };
+  if (!res.ok) return { ok: false, reason: "inventory_http_" + res.status };
+  const data = await res.json();
+  const list = data.data || data;
+  const owned = Array.isArray(list) && list.length > 0;
+  return { ok: true, owned };
+}
+async function handleRedeemGamepass(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const plan = typeof body.plan === "string" ? body.plan.trim().toLowerCase() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  const inventoryPublic = body.inventory_public === true || body.inventoryPublic === true;
+  if (!GAMEPASS_BY_PLAN[plan]) {
+    return json({ success: false, reason: "invalid_plan", allowed: Object.keys(GAMEPASS_BY_PLAN) }, 400);
+  }
+  if (!username || username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
+    return json({ success: false, reason: "invalid_username" }, 400);
+  }
+  if (!inventoryPublic) {
+    return json({
+      success: false,
+      reason: "inventory_checkbox_required",
+      message: "Set Roblox inventory to Everyone and check the box.",
+    }, 400);
+  }
+  const gamepassId = GAMEPASS_BY_PLAN[plan];
+  const user = await robloxUserIdFromUsername(username);
+  if (!user.ok) return json({ success: false, reason: user.reason }, 400);
+  const own = await ownsGamePass(user.userId, gamepassId);
+  if (!own.ok) {
+    return json({
+      success: false,
+      reason: own.reason,
+      message:
+        own.reason === "inventory_private"
+          ? "Inventory is private. Set Who can see my inventory = Everyone, wait 1-2 min, retry."
+          : "Could not check Game Pass ownership.",
+    }, 400);
+  }
+  if (!own.owned) {
+    return json({
+      success: false,
+      reason: "not_owned",
+      message: "Game Pass not found on this account. Buy it, wait ~30s, retry.",
+      store: GAMEPASS_STORE[plan],
+    }, 404);
+  }
+  const existing = await env.DB.prepare(
+    `SELECT key_value, plan, created_at FROM pass_redemptions
+     WHERE user_id = ? AND gamepass_id = ? LIMIT 1`
+  )
+    .bind(user.userId, gamepassId)
+    .first();
+  if (existing) {
+    return json({
+      success: true,
+      already_redeemed: true,
+      key: existing.key_value,
+      plan: existing.plan,
+      message: "This Game Pass was already redeemed. Showing existing key.",
+    });
+  }
+  const key = generateKey();
+  const timestamp = now();
+  const expires = timestamp + planTtl(plan);
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
+         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+      ).bind(key, user.name || username, "pass:" + gamepassId, timestamp, expires, plan),
+      env.DB.prepare(
+        `INSERT INTO pass_redemptions (user_id, username, gamepass_id, plan, key_value, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).bind(user.userId, user.name || username, gamepassId, plan, key, timestamp),
+    ]);
+  } catch (e) {
+    const again = await env.DB.prepare(
+      `SELECT key_value, plan FROM pass_redemptions WHERE user_id = ? AND gamepass_id = ? LIMIT 1`
+    )
+      .bind(user.userId, gamepassId)
+      .first();
+    if (again) {
+      return json({
+        success: true,
+        already_redeemed: true,
+        key: again.key_value,
+        plan: again.plan,
+      });
+    }
+    console.error("redeem insert", e);
+    return json({ success: false, reason: "db_error" }, 500);
+  }
+  return json({
+    success: true,
+    key,
+    plan,
+    expires_at: expires,
+    username: user.name || username,
+    user_id: user.userId,
+  });
+}
+
 /* ===================== LUA PROXY ===================== */
 async function proxyGithub(file) {
   const response = await fetch(`${GH}/${file}`, { cf: { cacheTtl: 0, cacheEverything: false } });
@@ -1645,6 +1787,68 @@ function pricingPage() {
     </article>
   </div>
   <p class="muted">See <a href="/tos">Terms of Service</a> for rewire, refunds, and key rules.</p>
+
+  <div class="card" style="margin-top:18px">
+    <h3>Redeem Game Pass → key</h3>
+    <p class="muted">1) Buy the pass · 2) Inventory = Everyone · 3) Redeem</p>
+    <label class="field">Roblox username</label>
+    <input id="rp_user" maxlength="20" placeholder="Username (not display name)" autocomplete="off"/>
+    <label class="field">Plan</label>
+    <select id="rp_plan">
+      <option value="week">Week (310 R$)</option>
+      <option value="month">Month (550 R$)</option>
+      <option value="year">Year (1100 R$)</option>
+    </select>
+    <label class="field" style="display:flex;gap:8px;align-items:center;margin-top:12px">
+      <input type="checkbox" id="rp_inv" style="width:auto"/>
+      My inventory is set to Everyone
+    </label>
+    <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:8px">
+      <a class="btn" id="rp_buy" href="https://www.roblox.com/game-pass/1963350769" target="_blank" rel="noopener">Open pass store</a>
+      <button type="button" class="btn btn-gold" id="rp_go">Redeem</button>
+    </div>
+    <p id="rp_out" class="muted" style="margin-top:12px;white-space:pre-wrap"></p>
+  </div>
+  <script>
+  (function(){
+    const stores = {
+      week: "https://www.roblox.com/game-pass/1963350769",
+      month: "https://www.roblox.com/game-pass/1965054742",
+      year: "https://www.roblox.com/game-pass/1966320456"
+    };
+    const planEl = document.getElementById("rp_plan");
+    const buy = document.getElementById("rp_buy");
+    if (planEl && buy) planEl.onchange = function(){ buy.href = stores[planEl.value] || stores.week; };
+    const go = document.getElementById("rp_go");
+    if (go) go.onclick = async function(){
+      const out = document.getElementById("rp_out");
+      const username = (document.getElementById("rp_user").value || "").trim();
+      const plan = planEl.value;
+      const inventory_public = document.getElementById("rp_inv").checked;
+      out.className = "muted";
+      out.textContent = "Checking...";
+      try {
+        const res = await fetch("/redeem/gamepass", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, plan, inventory_public })
+        });
+        const data = await res.json();
+        if (data.success && data.key) {
+          out.className = "ok";
+          out.textContent = (data.already_redeemed ? "Already redeemed\\n" : "OK\\n")
+            + "Key: " + data.key + "\\nPlan: " + (data.plan || plan);
+        } else {
+          out.className = "err";
+          out.textContent = (data.message || data.reason || res.status) + (data.store ? "\\n" + data.store : "");
+        }
+      } catch (e) {
+        out.className = "err";
+        out.textContent = String(e);
+      }
+    };
+  })();
+  </script>
 `, true);
 }
 
@@ -1779,6 +1983,7 @@ export default {
       }
       if (request.method === "POST" && path === "/generate-key") return await handleGenerateKey(request, env);
       if (request.method === "POST" && path === "/validate") return await handleValidate(request, env);
+      if (request.method === "POST" && path === "/redeem/gamepass") return await handleRedeemGamepass(request, env);
       
       // ADMIN
       const adminMatch = path.match(/^\/keys\/([^/]+)\/encrypted\/get-keys-all$/);
