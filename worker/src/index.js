@@ -852,10 +852,11 @@ async function proxyGithub(file) {
   if (!response.ok) return plain(`${file} not found`, 404);
   return plain(await response.text(), 200);
 }
-/* ===================== OBFUSCATOR (same as before) ===================== */
+
+/* ===================== OBFUSCATOR v2 (Shamir layer + API + long-bracket) ===================== */
 const PLUGIN_DEFS = [
   { key: "EncryptStrings", label: "Encrypt Strings", args: [100] },
-  { key: "SwizzleLookups", label: "Swizzle Lookups", args: [100] },
+  { key: "SwizzleLookups", label: "Swizzle Lookups / Table indirection", args: [100] },
   { key: "TableIndirection", label: "Table Indirection", args: [100] },
   { key: "EncryptFuncDeclaration", label: "Encrypt Func Declaration", args: [] },
   { key: "ControlFlowFlattenV1AllBlocks", label: "Control Flow Flatten V1", args: [75] },
@@ -866,15 +867,10 @@ const PLUGIN_DEFS = [
   { key: "MutateAllLiterals", label: "Mutate Literals", args: [50] },
   { key: "DummyFunctionArgs", label: "Dummy Function Args", args: [1, 3] },
 ];
+
+/** Safe API presets — Virtualize off by default (breaks Luau often) */
 function presetConfig(preset) {
-  if (preset === "basic" || preset === "light") {
-    return {
-      MinifiyAll: true,
-      Virtualize: false,
-      CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100], TableIndirection: [100] },
-    };
-  }
-  if (preset === "medium") {
+  if (preset === "basic" || preset === "light" || preset === "safe") {
     return {
       MinifiyAll: true,
       Virtualize: false,
@@ -882,341 +878,200 @@ function presetConfig(preset) {
         SwizzleLookups: [100],
         EncryptStrings: [100],
         TableIndirection: [100],
-        ControlFlowFlattenV1AllBlocks: [75],
-        RevertAllIfStatements: [50],
-        MutateAllLiterals: [40],
-        JunkifyAllIfStatements: [40],
       },
     };
   }
-  if (preset === "full" || preset === "vm") {
+  if (preset === "medium" || preset === "standard" || preset === "shamir") {
     return {
       MinifiyAll: true,
-      Virtualize: true,
-      ASCIIArt: "feet_1",
+      Virtualize: false,
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        TableIndirection: [100],
+        ControlFlowFlattenV1AllBlocks: [60],
+        MutateAllLiterals: [35],
+        JunkifyAllIfStatements: [30],
+      },
+    };
+  }
+  if (preset === "full" || preset === "heavy") {
+    return {
+      MinifiyAll: true,
+      Virtualize: false,
       CustomPlugins: {
         SwizzleLookups: [100],
         EncryptStrings: [100],
         TableIndirection: [100],
         EncryptFuncDeclaration: [],
-        ControlFlowFlattenV1AllBlocks: [100],
-        RevertAllIfStatements: [75],
-        MixedBooleanArithmetic: [75],
-        MutateAllLiterals: [60],
-        JunkifyAllIfStatements: [50],
-        DummyFunctionArgs: [1, 3],
+        ControlFlowFlattenV1AllBlocks: [85],
+        RevertAllIfStatements: [50],
+        MixedBooleanArithmetic: [50],
+        MutateAllLiterals: [50],
+        JunkifyAllIfStatements: [40],
+      },
+    };
+  }
+  if (preset === "vm") {
+    return {
+      MinifiyAll: true,
+      Virtualize: true,
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        TableIndirection: [100],
+        ControlFlowFlattenV1AllBlocks: [75],
       },
     };
   }
   return {
     MinifiyAll: true,
     Virtualize: false,
-    CustomPlugins: { SwizzleLookups: [100], EncryptStrings: [100], TableIndirection: [100] },
+    CustomPlugins: {
+      SwizzleLookups: [100],
+      EncryptStrings: [100],
+      TableIndirection: [100],
+    },
   };
 }
-function buildConfigFromOptions(opts) {
-  opts = opts || {};
-  const cfg = { MinifiyAll: opts.MinifiyAll !== false, Virtualize: !!opts.Virtualize };
-  if (opts.Multifile) cfg.Multifile = true;
-  if (opts.ASCIIArt) cfg.ASCIIArt = opts.ASCIIArt;
-  const plugins = {};
-  for (const p of PLUGIN_DEFS) {
-    if (opts[p.key]) plugins[p.key] = Array.isArray(p.args) ? p.args : [];
+
+function buildConfigFromOptions(options) {
+  const cfg = { MinifiyAll: true, Virtualize: !!options.Virtualize, CustomPlugins: {} };
+  for (const def of PLUGIN_DEFS) {
+    if (options[def.key]) {
+      cfg.CustomPlugins[def.key] = def.args && def.args.length ? def.args : [];
+    }
   }
-  if (Object.keys(plugins).length) cfg.CustomPlugins = plugins;
   return cfg;
 }
-function plainLongStringEmbed(code) {
-  if (code.includes("]=====]")) return `-- embed\nreturn loadstring([======[\n${code}\n]======])()`;
-  return `-- embed\nreturn loadstring([=====[\n${code}\n]=====])()`;
-}
-function bit32Embed(code) {
-  const key = 0x5a;
-  const bytes = [];
-  for (let i = 0; i < code.length; i++) bytes.push(code.charCodeAt(i) ^ (key + (i % 17)));
-  const parts = [];
-  for (let i = 0; i < bytes.length; i += 40) parts.push(bytes.slice(i, i + 40).join(","));
-  const dataLua = parts.map((p) => "{" + p + "}").join(",\n");
-  const payload = `-- Greedy embed+bit32
-local _k=${key}
-local _chunks={${dataLua}}
-local _out={}
-local _i=0
-for _,ch in ipairs(_chunks) do
-  for _,b in ipairs(ch) do
-    _i=_i+1
-    _out[#_out+1]=string.char(bit32.bxor(b,(_k+((_i-1)%17))))
-  end
-end
-local _src=table.concat(_out)
-local _fn,_err=loadstring(_src)
-if not _fn then error(_err) end
-return _fn()
-`;
-  if (payload.includes("]=====]")) return `return loadstring([======[\n${payload}\n]======])()`;
-  return `return loadstring([=====[\n${payload}\n]=====])()`;
-}
-function _ghXorStr(s, seed) {
-  const bytes = [];
-  for (let k = 0; k < s.length; k++) bytes.push(s.charCodeAt(k) ^ ((seed + k * 7) & 255));
-  return bytes;
-}
-function _ghParseStringsAndComments(src, opts) {
-  const strings = [];
+
+/** Minify to one line; preserve strings & long brackets */
+function minifyOneLine(code) {
+  if (typeof code !== "string") return "";
   let out = "";
   let i = 0;
-  const encrypt = opts.encryptStrings !== false;
-  while (i < src.length) {
-    const c = src[i];
-    if (c === "-" && src[i + 1] === "-") {
-      let j = i + 2;
-      if (src[j] === "[") {
-        let n = 0;
-        j++;
-        while (src[j] === "=") {
-          n++;
-          j++;
-        }
-        if (src[j] === "[") {
-          j++;
-          while (j < src.length) {
-            if (src[j] === "]") {
-              let k = j + 1,
-                m = 0;
-              while (src[k] === "=") {
-                m++;
-                k++;
-              }
-              if (m === n && src[k] === "]") {
-                j = k + 1;
-                break;
-              }
-            }
-            j++;
-          }
-          if (!opts.stripComments) out += src.slice(i, j);
-          i = j;
+  const n = code.length;
+  while (i < n) {
+    const c = code[i];
+    // long string [=[...]=]
+    if (c === "[" && code[i + 1] === "[") {
+      let eq = 0;
+      let j = i + 1;
+      // actually [====[ form
+    }
+    if (c === "[") {
+      let k = i + 1;
+      let eqs = 0;
+      while (k < n && code[k] === "=") {
+        eqs++;
+        k++;
+      }
+      if (k < n && code[k] === "[") {
+        const open = code.slice(i, k + 1);
+        const close = "]" + "=".repeat(eqs) + "]";
+        const end = code.indexOf(close, k + 1);
+        if (end !== -1) {
+          out += code.slice(i, end + close.length);
+          i = end + close.length;
           continue;
         }
       }
-      const lineStart = i;
-      while (i < src.length && src[i] !== "\n") i++;
-      if (!opts.stripComments) out += src.slice(lineStart, i);
-      continue;
     }
-    if (c === "[" && (src[i + 1] === "[" || src[i + 1] === "=")) {
-      let j = i + 1,
-        n = 0;
-      if (src[j] === "=") {
-        while (src[j] === "=") {
-          n++;
-          j++;
-        }
-      }
-      if (src[j] === "[") {
-        j++;
-        while (j < src.length) {
-          if (src[j] === "]") {
-            let k = j + 1,
-              m = 0;
-            while (src[k] === "=") {
-              m++;
-              k++;
-            }
-            if (m === n && src[k] === "]") {
-              j = k + 1;
-              break;
-            }
-          }
-          j++;
-        }
-        out += src.slice(i, j);
-        i = j;
-        continue;
-      }
-    }
-    if (encrypt && (c === '"' || c === "'")) {
+    // single / double strings
+    if (c === '"' || c === "'") {
       const q = c;
-      let j = i + 1,
-        lit = "";
-      while (j < src.length) {
-        if (src[j] === "\\") {
-          lit += src[j] + (src[j + 1] || "");
-          j += 2;
+      out += c;
+      i++;
+      while (i < n) {
+        out += code[i];
+        if (code[i] === "\\" && i + 1 < n) {
+          out += code[i + 1];
+          i += 2;
           continue;
         }
-        if (src[j] === q) {
-          j++;
+        if (code[i] === q) {
+          i++;
           break;
         }
-        lit += src[j];
-        j++;
+        i++;
       }
-      const raw = lit
-        .replace(/\\n/g, "\n")
-        .replace(/\\t/g, "\t")
-        .replace(/\\"/g, '"')
-        .replace(/\\'/g, "'")
-        .replace(/\\\\/g, "\\");
-      strings.push(raw);
-      out += "_S[" + strings.length + "]";
+      continue;
+    }
+    // line comments
+    if (c === "-" && code[i + 1] === "-") {
+      if (code[i + 2] === "[") {
+        // block comment --[=[ ]=]
+        let k = i + 2;
+        let eqs = 0;
+        if (code[k] === "[") {
+          k++;
+          while (k < n && code[k] === "=") {
+            eqs++;
+            k++;
+          }
+          if (code[k] === "[") {
+            const close = "]" + "=".repeat(eqs) + "]";
+            const end = code.indexOf(close, k + 1);
+            if (end !== -1) {
+              i = end + close.length;
+              continue;
+            }
+          }
+        }
+      }
+      // -- line
+      while (i < n && code[i] !== "\n") i++;
+      continue;
+    }
+    // whitespace collapse
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") {
+      // keep single space only if needed between alnum
+      const prev = out.length ? out[out.length - 1] : "";
+      let j = i;
+      while (j < n && /\s/.test(code[j])) j++;
+      const next = j < n ? code[j] : "";
+      if (/[A-Za-z0-9_]/.test(prev) && /[A-Za-z0-9_]/.test(next)) {
+        out += " ";
+      }
       i = j;
       continue;
     }
     out += c;
     i++;
   }
-  return { code: out, strings };
+  return out;
 }
-function _ghAliasGlobals(code, level) {
-  const sets = [
-    { game: "_T[1]", workspace: "_T[2]", print: "_T[3]", warn: "_T[4]" },
-    {
-      game: "_T[1]",
-      workspace: "_T[2]",
-      pairs: "_T[3]",
-      ipairs: "_T[4]",
-      pcall: "_T[5]",
-      type: "_T[6]",
-      tostring: "_T[7]",
-      tonumber: "_T[8]",
-      print: "_T[9]",
-      warn: "_T[10]",
-      select: "_T[11]",
-      next: "_T[12]",
-      rawget: "_T[13]",
-      rawset: "_T[14]",
-    },
-    {
-      game: "_T[1]",
-      workspace: "_T[2]",
-      pairs: "_T[3]",
-      ipairs: "_T[4]",
-      pcall: "_T[5]",
-      type: "_T[6]",
-      tostring: "_T[7]",
-      tonumber: "_T[8]",
-      print: "_T[9]",
-      warn: "_T[10]",
-      select: "_T[11]",
-      next: "_T[12]",
-      rawget: "_T[13]",
-      rawset: "_T[14]",
-      require: "_T[15]",
-      tick: "_T[16]",
-      typeof: "_T[17]",
-      unpack: "_T[18]",
-      error: "_T[19]",
-      assert: "_T[20]",
-    },
-  ];
-  const aliases = sets[Math.max(0, Math.min(2, level - 1))];
-  let body = code;
-  for (const [name, repl] of Object.entries(aliases)) {
-    body = body.replace(new RegExp("\\b" + name + "\\b", "g"), repl);
-  }
-  const list = {
-    1: "game,workspace,print,warn",
-    2: "game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next,rawget,rawset",
-    3: "game,workspace,pairs,ipairs,pcall,type,tostring,tonumber,print,warn,select,next,rawget,rawset,require,tick,typeof,unpack or table.unpack,error,assert",
-  };
-  return { body, tInit: list[level] || list[2] };
-}
-function _ghEncodeNumbers(code, level) {
-  if (level < 2) return code;
-  return code.replace(/\b([2-9]\d{0,4})\b/g, (m, n, off, s) => {
-    const before = s.slice(Math.max(0, off - 3), off);
-    if (/_S\[$|_T\[$/.test(before) || before.endsWith("[")) return m;
-    const v = Number(n);
-    if (level >= 3) {
-      const a = (v ^ 0x3d) + 1;
-      return "(bit32.bxor(" + a + ",61)-1)";
-    }
-    return "(" + (v + 17) + "-17)";
-  });
-}
-function _ghJunk(level) {
-  if (level < 2) return "";
-  const lines = [];
-  for (let i = 0; i < (level >= 3 ? 4 : 2); i++) {
-    const n = 1000 + Math.floor(Math.random() * 8000);
-    lines.push("do local _j" + i + "=" + n + " if _j" + i + "==" + (n + 1) + " then return end end");
-  }
-  return lines.join("\n") + "\n";
-}
-function _ghWrapRuntime(body, strings, tInit, seed) {
-  const strTable = strings.map((s) => "{" + _ghXorStr(s, seed).join(",") + "}").join(",");
-  return (
-    "-- GH local obfuscate\n" +
-    "local _T={" +
-    tInit +
-    "}\n" +
-    "local _S={}\n" +
-    "do local _d={" +
-    strTable +
-    "} local _k=" +
-    seed +
-    "\n" +
-    "for _i=1,#_d do local _b=_d[_i] local _o={} for _j=1,#_b do " +
-    "_o[_j]=string.char(bit32.bxor(_b[_j],bit32.band(_k+(_j-1)*7,255))) end " +
-    "_S[_i]=table.concat(_o) end end\n" +
-    _ghJunk(strings.length > 0 ? 2 : 1) +
-    body
-  );
-}
-function _ghObfuscateChunk(src, level) {
-  const seed = 0x5a + level * 13;
-  const parsed = _ghParseStringsAndComments(src, { encryptStrings: true, stripComments: level >= 2 });
-  let code = parsed.code;
-  const aliased = _ghAliasGlobals(code, level);
-  code = aliased.body;
-  code = _ghEncodeNumbers(code, level);
-  if (level >= 2) code = code.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n");
-  return _ghWrapRuntime(code, parsed.strings, aliased.tInit, seed);
-}
-function _ghProcessLongBrackets(code, level) {
-  let i = 0,
-    out = "";
-  while (i < code.length) {
+
+/** If script contains long-bracket literals, scramble/minify their *contents* */
+function processLongBrackets(code) {
+  let i = 0;
+  let out = "";
+  const n = code.length;
+  while (i < n) {
     if (code[i] === "[") {
-      let j = i + 1,
-        n = 0;
-      while (code[j] === "=") {
-        n++;
-        j++;
+      let k = i + 1;
+      let eqs = 0;
+      while (k < n && code[k] === "=") {
+        eqs++;
+        k++;
       }
-      if (code[j] === "[") {
-        const openEnd = j + 1;
-        let k = openEnd,
-          closeAt = -1;
-        while (k < code.length) {
-          if (code[k] === "]") {
-            let m = 0,
-              p = k + 1;
-            while (code[p] === "=") {
-              m++;
-              p++;
-            }
-            if (m === n && code[p] === "]") {
-              closeAt = k;
-              break;
-            }
-          }
-          k++;
-        }
-        if (closeAt >= 0) {
-          const inner = code.slice(openEnd, closeAt);
-          const closeEnd = closeAt + 1 + n + 1;
-          const looksCode = /\b(function|local|end|return|game:|GetService|print\s*\()\b/.test(inner);
-          if (looksCode && inner.trim().length > 8) {
-            const ob = _ghObfuscateChunk(inner, level);
-            let eqs = n;
-            while (ob.indexOf("]" + "=".repeat(eqs) + "]") !== -1 && eqs < 12) eqs++;
-            out += "[" + "=".repeat(eqs) + "[" + ob + "]" + "=".repeat(eqs) + "]";
+      if (k < n && code[k] === "[") {
+        const close = "]" + "=".repeat(eqs) + "]";
+        const contentStart = k + 1;
+        const end = code.indexOf(close, contentStart);
+        if (end !== -1) {
+          let inner = code.slice(contentStart, end);
+          // only touch if looks like code (has function/local/end)
+          if (/\b(function|local|end|return)\b/.test(inner) && inner.length > 40) {
+            inner = minifyOneLine(inner);
+            // light string noise: wrap as still valid Lua code inside
+            inner = localStringEncrypt(inner);
+            inner = minifyOneLine(inner);
           } else {
-            out += code.slice(i, closeEnd);
+            inner = minifyOneLine(inner);
           }
-          i = closeEnd;
+          out += code.slice(i, contentStart) + inner + close;
+          i = end + close.length;
           continue;
         }
       }
@@ -1226,98 +1081,117 @@ function _ghProcessLongBrackets(code, level) {
   }
   return out;
 }
+
+/** Simple local string encrypt for offline layer */
+function localStringEncrypt(code) {
+  // replace "..." string literals with (_G[string.char(...)] pattern) — only plain double quotes, no escapes heavy
+  return code.replace(/"([^"\\]{3,80})"/g, (m, s) => {
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) bytes.push(s.charCodeAt(i));
+    return `(string.char(${bytes.join(",")}))`;
+  });
+}
+
+/** Shamir runtime (fixed) — reconstruct only; shares are compile-time constants */
+const SHAMIR_RUNTIME = `
+local __P=257
+local function __modinv(a,m)a=a%m;local r0,r1,s0,s1=a,m,1,0;while r1~=0 do local q=math.floor(r0/r1);r0,r1=r1,r0-q*r1;s0,s1=s1,s0-q*s1 end;return s0%m end
+local function __recon(points)local secret=0;for i=1,#points do local xi,yi=points[i][1],points[i][2];local num,den=1,1;for j=1,#points do if j~=i then local xj=points[j][1];num=(num*(-xj))%__P;den=(den*(xi-xj))%__P end end;secret=(secret+yi*num%__P*__modinv(den,__P))%__P end;return secret%__P end
+`.replace(/\n+/g, " ");
+
+/** Deterministic shares for small secrets (offline, no math.random in shipped code) */
+function makeSharesDeterministic(secret, threshold, shareCount, seed) {
+  const P = 257;
+  const coeffs = [secret % P];
+  let s = seed >>> 0;
+  for (let i = 1; i < threshold; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    coeffs.push((s % (P - 1)) + 1);
+  }
+  const shares = [];
+  for (let x = 1; x <= shareCount; x++) {
+    let y = 0;
+    let xp = 1;
+    for (let i = 0; i < coeffs.length; i++) {
+      y = (y + coeffs[i] * xp) % P;
+      xp = (xp * x) % P;
+    }
+    shares.push([x, y]);
+  }
+  return shares;
+}
+
+/**
+ * Optional Shamir layer: rewrite simple numeric state assigns when safe.
+ * Only touches patterns:  state = N  /  state=N  for small N (1..64)
+ * Leaves logic equivalent via __recon(fixed shares)
+ */
+function applyShamirLayer(code) {
+  let seed = 0xC0FFEE;
+  const out = code.replace(
+    /\b(state|_s|st)\s*=\s*(\d{1,2})\b/g,
+    (m, name, num) => {
+      const n = parseInt(num, 10);
+      if (n < 1 || n > 64) return m;
+      seed = (seed * 1103515245 + 12345) >>> 0;
+      const shares = makeSharesDeterministic(n, 2, 3, seed);
+      // use first 2 shares
+      const a = shares[0];
+      const b = shares[1];
+      return `${name}=__recon({{${a[0]},${a[1]}},{${b[0]},${b[1]}}})`;
+    }
+  );
+  if (out === code) {
+    return SHAMIR_RUNTIME + "\n" + code;
+  }
+  return SHAMIR_RUNTIME + "\n" + out;
+}
+
 function localObfuscate(code, level) {
-  level = Math.max(1, Math.min(3, level || 1));
-  const step1 = _ghProcessLongBrackets(code, level);
-  let i = 0,
-    out = "";
-  while (i < step1.length) {
-    if (step1[i] === "[") {
-      let j = i + 1,
-        n = 0;
-      while (step1[j] === "=") {
-        n++;
-        j++;
-      }
-      if (step1[j] === "[") {
-        const openEnd = j + 1;
-        let k = openEnd,
-          closeAt = -1;
-        while (k < step1.length) {
-          if (step1[k] === "]") {
-            let m = 0,
-              p = k + 1;
-            while (step1[p] === "=") {
-              m++;
-              p++;
-            }
-            if (m === n && step1[p] === "]") {
-              closeAt = k;
-              break;
-            }
-          }
-          k++;
-        }
-        if (closeAt >= 0) {
-          out += step1.slice(i, closeAt + 1 + n + 1);
-          i = closeAt + 1 + n + 1;
-          continue;
-        }
-      }
-    }
-    let start = i;
-    while (i < step1.length) {
-      if (step1[i] === "[") {
-        let j = i + 1,
-          n = 0;
-        while (step1[j] === "=") {
-          n++;
-          j++;
-        }
-        if (step1[j] === "[") break;
-      }
-      i++;
-    }
-    const plain = step1.slice(start, i);
-    if (plain.trim()) out += _ghObfuscateChunk(plain, level);
-    else out += plain;
+  level = level || 1;
+  let c = String(code || "");
+  c = processLongBrackets(c);
+  if (level >= 1) {
+    c = localStringEncrypt(c);
   }
-  return out;
-}
-function localBasicObfuscate(code) {
-  return localObfuscate(code, 1);
-}
-async function withTimeout(promise, ms) {
-  let timer;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, rej) => {
-        timer = setTimeout(() => rej(new Error("timeout " + ms + "ms")), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
+  if (level >= 2) {
+    c = applyShamirLayer(c);
   }
+  c = minifyOneLine(c);
+  return c;
 }
+
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout " + ms + "ms")), ms)),
+  ]);
+}
+
 async function callLuaObf(apiKey, code, cfg) {
   const newRes = await fetch(LUAOBF_NEW, {
     method: "POST",
-    headers: { "Content-Type": "text/plain; charset=utf-8", apikey: apiKey },
+    headers: {
+      "Content-Type": "application/json",
+      apikey: apiKey,
+    },
     body: code,
   });
-  if (!newRes.ok) {
-    const t = await newRes.text();
-    return { ok: false, error: `newscript HTTP ${newRes.status}: ${t.slice(0, 300)}` };
-  }
-  let session;
+  const newText = await newRes.text();
+  let newJson = null;
   try {
-    session = await newRes.json();
-  } catch {
-    return { ok: false, error: "newscript: invalid JSON" };
+    newJson = JSON.parse(newText);
+  } catch (_) {}
+  const sessionId =
+    (newJson && newJson.sessionId) ||
+    newRes.headers.get("sessionId") ||
+    newRes.headers.get("sessionid");
+  if (!sessionId) {
+    return {
+      ok: false,
+      error: `newscript failed HTTP ${newRes.status}: ${(newText || "").slice(0, 240)}`,
+    };
   }
-  const sessionId = session.sessionId || newRes.headers.get("sessionId") || newRes.headers.get("sessionid");
-  if (!sessionId) return { ok: false, error: session.message || "no sessionId from newscript" };
   const runRes = await fetch(LUAOBF_RUN, {
     method: "POST",
     headers: {
@@ -1325,233 +1199,222 @@ async function callLuaObf(apiKey, code, cfg) {
       apikey: apiKey,
       sessionId: sessionId,
     },
-    body: JSON.stringify(cfg || {}),
+    body: JSON.stringify(cfg),
   });
+  const t = await runRes.text();
   if (!runRes.ok) {
-    const t = await runRes.text();
     return { ok: false, error: `obfuscate HTTP ${runRes.status}: ${t.slice(0, 300)}` };
   }
-  let out;
+  let data = null;
   try {
-    out = await runRes.json();
-  } catch {
+    data = JSON.parse(t);
+  } catch (_) {
     return { ok: false, error: "obfuscate: invalid JSON" };
   }
-  if (!out.code) return { ok: false, error: out.message || "empty code from API" };
-  return { ok: true, code: out.code, sessionId };
-}
-function syntaxCheck(code) {
-  const issues = [];
-  if (!code || !code.trim()) return { ok: false, issues: ["empty code"] };
-  const pairs = { "(": ")", "[": "]", "{": "}" };
-  const stack = [];
-  let i = 0;
-  let line = 1;
-  let inStr = null;
-  let longEq = 0;
-  while (i < code.length) {
-    const c = code[i];
-    if (c === "\n") line++;
-    if (!inStr && c === "[" && code[i + 1] === "[") {
-      inStr = "long";
-      longEq = 0;
-      i += 2;
-      continue;
-    }
-    if (!inStr && c === "[" && code[i + 1] === "=") {
-      let n = 0;
-      let j = i + 1;
-      while (code[j] === "=") {
-        n++;
-        j++;
-      }
-      if (code[j] === "[") {
-        inStr = "long";
-        longEq = n;
-        i = j + 1;
-        continue;
-      }
-    }
-    if (inStr === "long") {
-      if (c === "]") {
-        let n = 0;
-        let j = i + 1;
-        while (code[j] === "=") {
-          n++;
-          j++;
-        }
-        if (n === longEq && code[j] === "]") {
-          inStr = null;
-          i = j + 1;
-          continue;
-        }
-      }
-      i++;
-      continue;
-    }
-    if (!inStr && c === "-" && code[i + 1] === "-") {
-      let j = i + 2;
-      if (code[j] === "[") {
-        let n = 0;
-        j++;
-        while (code[j] === "=") {
-          n++;
-          j++;
-        }
-        if (code[j] === "[") {
-          j++;
-          while (j < code.length) {
-            if (code[j] === "\n") line++;
-            if (code[j] === "]") {
-              let k = j + 1;
-              let m = 0;
-              while (code[k] === "=") {
-                m++;
-                k++;
-              }
-              if (m === n && code[k] === "]") {
-                i = k + 1;
-                break;
-              }
-            }
-            j++;
-          }
-          if (j >= code.length) {
-            issues.push("unclosed long comment --[[");
-            break;
-          }
-          continue;
-        }
-      }
-      while (i < code.length && code[i] !== "\n") i++;
-      continue;
-    }
-    if (!inStr && (c === '"' || c === "'")) {
-      inStr = c;
-      i++;
-      continue;
-    }
-    if (inStr === '"' || inStr === "'") {
-      if (c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (c === inStr) inStr = null;
-      i++;
-      continue;
-    }
-    if (pairs[c]) stack.push({ ch: c, line });
-    else if (c === ")" || c === "]" || c === "}") {
-      const top = stack.pop();
-      if (!top || pairs[top.ch] !== c) issues.push(`line ${line}: unexpected '${c}'`);
-    }
-    i++;
+  if (data.message && !data.code) {
+    return { ok: false, error: String(data.message) };
   }
-  if (inStr) issues.push("unclosed string/long-string");
-  for (const s of stack) issues.push(`line ${s.line}: unclosed '${s.ch}'`);
-  return { ok: issues.length === 0, issues };
+  if (!data.code) {
+    return { ok: false, error: "obfuscate: empty code" };
+  }
+  return { ok: true, code: data.code, sessionId };
 }
+
+/** Full pipeline used by /api/obfuscate */
+async function runObfuscatePipeline(code, preset, apiKey, options) {
+  // 1) always process long-bracket *contents* first (user request)
+  let stage = processLongBrackets(code);
+
+  // 2) local minify pass before API (smaller upload)
+  const preMin = minifyOneLine(stage);
+
+  if (preset === "local" || preset === "minify") {
+    return {
+      ok: true,
+      code: minifyOneLine(localStringEncrypt(stage)),
+      mode: "local_minify",
+      note: "local one-line + string char encode; long-brackets processed",
+    };
+  }
+
+  if (preset === "shamir_only") {
+    return {
+      ok: true,
+      code: minifyOneLine(applyShamirLayer(processLongBrackets(code))),
+      mode: "shamir_local",
+      note: "Shamir reconstruct layer + long-brackets + one-line (no API)",
+    };
+  }
+
+  const cfg =
+    preset === "custom"
+      ? buildConfigFromOptions(options || {})
+      : presetConfig(preset);
+
+  // never force VM unless user picked vm
+  if (preset !== "vm") cfg.Virtualize = false;
+  cfg.MinifiyAll = true;
+
+  try {
+    const result = await withTimeout(callLuaObf(apiKey, preMin.length < 900000 ? preMin : stage, cfg), 25000);
+    if (result && result.ok && result.code) {
+      let finalCode = result.code;
+      // 3) post: one-line + optional shamir wrapper on API output for "shamir" preset
+      if (preset === "shamir" || preset === "standard") {
+        // inject runtime only if not already minified heavily — still add reconstruct helper
+        if (!finalCode.includes("__recon")) {
+          finalCode = SHAMIR_RUNTIME + " " + finalCode;
+        }
+      }
+      finalCode = minifyOneLine(finalCode);
+      return {
+        ok: true,
+        code: finalCode,
+        mode: preset,
+        sessionId: result.sessionId,
+        note: "API (" + preset + ") + long-brackets pre + one-line post",
+      };
+    }
+    const err = (result && result.error) || "api failed";
+    const level = preset === "full" || preset === "heavy" ? 2 : 2;
+    return {
+      ok: true,
+      code: localObfuscate(code, level),
+      mode: preset + "_local",
+      note: "API fail → local: " + err,
+    };
+  } catch (e) {
+    return {
+      ok: true,
+      code: localObfuscate(code, 2),
+      mode: preset + "_local",
+      note: "API error → local: " + String(e && e.message ? e.message : e),
+    };
+  }
+}
+
 function obfuscatePage(siteName) {
-  return pageShell(
-    "Obfuscator · " + siteName,
-    `
-<div class="logo">${siteName} · Obfuscator</div>
-<p class="muted">API: luaobfuscator.com. Basic=local L1. Medium/Full/VM=API first, local fallback.</p>
-<label>Preset</label>
-<select id="preset">
-  <option value="basic" selected>Basic — local L1</option>
-  <option value="medium">Medium</option>
-  <option value="full">Full</option>
-  <option value="vm">VM</option>
-  <option value="embed">Wrap loadstring</option>
-  <option value="embed_bit32">Wrap bit32+loadstring</option>
-  <option value="custom">Custom</option>
-</select>
-<div id="customBox" style="display:none;margin-top:10px">
-  <label class="chk"><input type="checkbox" data-root="MinifiyAll" checked/> Minify All</label>
-  <label class="chk"><input type="checkbox" data-root="Virtualize"/> Virtualize</label>
+  const name = siteName || "Greedy Hudzell";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${name} · Obfuscator</title>
+<style>
+:root{--bg:#0a0906;--card:#12100a;--gold:#c9a227;--text:#ffeebf;--muted:#9a8555;--line:#2a2410}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{color:var(--gold)}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.4rem;margin:0 0 8px}
+.muted{color:var(--muted);font-size:.9rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:16px}
+label{display:block;margin:10px 0 6px;color:var(--muted);font-size:.85rem}
+select,textarea,button{width:100%;border-radius:8px;border:1px solid var(--line);background:#0c0a05;color:var(--text);padding:10px;font-family:ui-monospace,monospace}
+textarea{min-height:220px;resize:vertical}
+button{cursor:pointer;background:linear-gradient(180deg,#3a3010,#2a2410);border-color:var(--gold);font-weight:600;margin-top:10px}
+button:hover{filter:brightness(1.08)}
+#status{margin-top:10px;font-size:.9rem}
+.ok{color:#8dcf8d}.err{color:#ff8a8a}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.row>*{flex:1;min-width:140px}
+.nav{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.nav a{text-decoration:none;border:1px solid var(--line);padding:6px 10px;border-radius:999px;font-size:.85rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="nav">
+    <a href="/home">Home</a>
+    <a href="/pricing">Pricing</a>
+    <a href="/obfuscator">Obfuscator</a>
+    <a href="/status">Status</a>
+  </div>
+  <h1>${name} Obfuscator</h1>
+  <p class="muted">
+    Pipeline: process code inside long-brackets <code>[====[ ... ]====]</code> if present →
+    luaobfuscator safe plugins → optional Shamir control-flow helper → minify to <b>one line</b>.
+    Virtualize (VM) is optional and may break Luau — default is off.
+  </p>
+  <div class="card">
+    <div class="row">
+      <div>
+        <label>Preset</label>
+        <select id="preset">
+          <option value="standard" selected>Standard (API + one-line + Shamir runtime)</option>
+          <option value="safe">Safe (API: strings + table indirection)</option>
+          <option value="medium">Medium (API + light CF flatten)</option>
+          <option value="shamir">Shamir+API (same as standard)</option>
+          <option value="shamir_only">Shamir local only (no API)</option>
+          <option value="full">Heavy (API, no VM)</option>
+          <option value="vm">VM (API Virtualize — may break)</option>
+          <option value="local">Local minify + strings only</option>
+          <option value="custom">Custom plugins</option>
+        </select>
+      </div>
+    </div>
+    <div id="customBox" style="display:none;margin-top:8px">
+      <label>Custom plugins</label>
+      <div id="plugins" class="row"></div>
+    </div>
+    <label>Lua source</label>
+    <textarea id="code" placeholder="paste Lua here"></textarea>
+    <button id="go" type="button">Obfuscate</button>
+    <div id="status"></div>
+    <label>Output</label>
+    <textarea id="out" readonly placeholder="result"></textarea>
+    <button id="copy" type="button">Copy output</button>
+  </div>
 </div>
-<label style="margin-top:14px">Input Lua</label>
-<textarea id="input" placeholder="paste Lua..." style="min-height:220px"></textarea>
-<div class="actions">
-  <button id="run">Obfuscate</button>
-  <button class="secondary" id="checkIn">Syntax check</button>
-  <button class="secondary" id="copy">Copy output</button>
-</div>
-<label style="margin-top:14px">Output</label>
-<textarea id="output" placeholder="result..." style="min-height:220px"></textarea>
-<p id="status" class="muted"></p>
 <script>
-const statusEl=document.getElementById('status');
-const input=document.getElementById('input');
-const output=document.getElementById('output');
+const PLUGIN_DEFS=[
+  {key:'EncryptStrings',label:'Encrypt Strings'},
+  {key:'SwizzleLookups',label:'Swizzle Lookups'},
+  {key:'TableIndirection',label:'Table Indirection'},
+  {key:'ControlFlowFlattenV1AllBlocks',label:'CF Flatten'},
+  {key:'MutateAllLiterals',label:'Mutate Literals'},
+  {key:'JunkifyAllIfStatements',label:'Junkify Ifs'},
+  {key:'MixedBooleanArithmetic',label:'MBA'}
+];
 const preset=document.getElementById('preset');
 const customBox=document.getElementById('customBox');
-const runBtn=document.getElementById('run');
+const plugins=document.getElementById('plugins');
+PLUGIN_DEFS.forEach(p=>{
+  const id='p_'+p.key;
+  const lab=document.createElement('label');
+  lab.style.display='flex';lab.style.gap='6px';lab.style.alignItems='center';
+  lab.innerHTML='<input type="checkbox" id="'+id+'"/> '+p.label;
+  plugins.appendChild(lab);
+});
 preset.onchange=()=>{ customBox.style.display = preset.value==='custom' ? 'block' : 'none'; };
 function collectOptions(){
-  const opts={};
-  document.querySelectorAll('[data-root]').forEach(el=>opts[el.getAttribute('data-root')]=el.checked);
-  document.querySelectorAll('[data-plugin]').forEach(el=>opts[el.getAttribute('data-plugin')]=el.checked);
-  return opts;
+  const o={};
+  PLUGIN_DEFS.forEach(p=>{ o[p.key]= !!document.getElementById('p_'+p.key)?.checked; });
+  return o;
 }
-document.getElementById('checkIn').onclick=async()=>{
-  statusEl.textContent='Checking...';
-  try{
-    const res=await fetch('/api/syntax-check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:input.value||''})});
-    const data=await res.json();
-    statusEl.innerHTML=data.ok?'<span class="ok">Syntax OK</span>':'<span class="error">'+(data.issues||[]).join('<br>')+'</span>';
-  }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
-};
-runBtn.onclick=async()=>{
-  const code=input.value||'';
-  if(!code.trim()){statusEl.textContent='Paste code first';return}
-  runBtn.disabled=true;statusEl.textContent='Obfuscating...';output.value='';
+document.getElementById('go').onclick=async()=>{
+  const code=document.getElementById('code').value;
+  const statusEl=document.getElementById('status');
+  const out=document.getElementById('out');
+  if(!code||code.trim().length<2){ statusEl.innerHTML='<span class="err">Empty source</span>'; return; }
+  statusEl.textContent='Working...';
+  out.value='';
   try{
     const res=await fetch('/api/obfuscate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({preset:preset.value,options:collectOptions(),code})});
-    let data;
-    try{ data=await res.json(); }catch(_){
-      statusEl.innerHTML='<span class="error">Bad response HTTP '+res.status+'</span>';
-      runBtn.disabled=false;return;
-    }
-    if(!data.ok){
-      statusEl.innerHTML='<span class="error">'+(data.error||'failed')+'</span>';
-    } else {
-      output.value=data.code||'';
-      statusEl.innerHTML='<span class="ok">OK · '+(data.mode||preset.value)+' · '+(data.code||'').length+' chars</span>';
-    }
-  }catch(e){statusEl.innerHTML='<span class="error">'+String(e)+'</span>'}
-  runBtn.disabled=false;
+    const data=await res.json();
+    if(!data.ok){ statusEl.innerHTML='<span class="err">'+(data.error||res.status)+'</span>'; return; }
+    out.value=data.code||'';
+    statusEl.innerHTML='<span class="ok">OK · '+(data.mode||'')+' · '+(data.code||'').length+' chars · '+(data.note||'')+'</span>';
+  }catch(e){ statusEl.innerHTML='<span class="err">'+e+'</span>'; }
 };
 document.getElementById('copy').onclick=async()=>{
-  try{await navigator.clipboard.writeText(output.value||'');statusEl.textContent='Copied'}catch(_){statusEl.textContent='Copy failed'}
+  const t=document.getElementById('out').value;
+  try{ await navigator.clipboard.writeText(t); document.getElementById('status').innerHTML='<span class="ok">Copied</span>'; }catch(e){}
 };
+
 </script>
-`
-  );
-}
-
-/* ===================== SITE PAGES (black/gold nav) ===================== */
-const DISCORD_INVITE = "https://discord.gg/sbVuaT9a2T";
-const FREE_KEY_LINK = "https://work.ink/28wp/Greedy-hudzell";
-const WEAO_URL = "https://weao.xyz/api/status/exploits";
-
-function siteNav(active) {
-  const items = [
-    ["/home", "Home"],
-    ["/pricing", "Pricing"],
-    ["/status", "Status"],
-    ["/executors", "Executors"],
-    ["/guide", "Guide"],
-    ["/tos", "ToS"],
-    ["/obfuscator", "Obfuscator"],
-  ];
-  return items
-    .map(([href, label]) => {
-      const on = active === label.toLowerCase();
-      return `<a href="${href}" class="${on ? "active" : ""}">${label}</a>`;
-    })
-    .join("");
+</body></html>`;
 }
 
 function siteShell(title, active, bodyHtml, wide = false) {
@@ -2043,56 +1906,27 @@ export default {
         try {
           body = await request.json();
         } catch {
-          return json({ ok: false, error: "invalid JSON" }, 400);
+          return json({ ok: false, error: "invalid_json" }, 400);
         }
         const code = typeof body.code === "string" ? body.code : "";
-        const preset = body.preset || "basic";
-        if (!code || code.length < 2) return json({ ok: false, error: "empty code" }, 400);
-        if (code.length > 1_500_000) return json({ ok: false, error: "code too large" }, 413);
+        if (!code || code.length < 2) return json({ ok: false, error: "empty_code" }, 400);
+        if (code.length > 1200000) return json({ ok: false, error: "code_too_large" }, 413);
+        const preset = body.preset || "standard";
         const apiKey = env.LUAOBF_API_KEY || LUAOBF_FALLBACK;
-        if (preset === "embed") return json({ ok: true, code: plainLongStringEmbed(code), mode: "embed" });
-        if (preset === "embed_bit32") return json({ ok: true, code: bit32Embed(code), mode: "embed_bit32" });
-        if (preset === "basic") {
-          try {
-            return json({ ok: true, code: localObfuscate(code, 1), mode: "basic", note: "local L1" });
-          } catch (e) {
-            return json({ ok: false, error: String(e && e.message ? e.message : e) }, 500);
-          }
-        }
-        const cfg =
-          preset === "custom" ? buildConfigFromOptions(body.options || {}) : presetConfig(preset === "vm" ? "full" : preset);
-        if (preset === "full" || preset === "vm") cfg.Virtualize = true;
         try {
-          const result = await withTimeout(callLuaObf(apiKey, code, cfg), 20000);
-          if (result && result.ok && result.code) {
-            return json({
-              ok: true,
-              code: result.code,
-              mode: preset,
-              sessionId: result.sessionId,
-              note: cfg.Virtualize ? "API + Virtualize" : "API",
-            });
-          }
-          const err = (result && result.error) || "api failed";
-          const level = preset === "full" || preset === "vm" ? 3 : 2;
-          return json({
-            ok: true,
-            code: localObfuscate(code, level),
-            mode: preset + "_local_L" + level,
-            note: "API fail (" + err + ") → local L" + level,
-          });
+          const result = await runObfuscatePipeline(code, preset, apiKey, body.options || {});
+          return json(result, result.ok ? 200 : 502);
         } catch (e) {
-          const level = preset === "full" || preset === "vm" ? 3 : 2;
           return json({
             ok: true,
-            code: localObfuscate(code, level),
-            mode: preset + "_local_L" + level,
-            note: "API error → local L" + level + ": " + String(e && e.message ? e.message : e),
+            code: localObfuscate(code, 2),
+            mode: "local_emergency",
+            note: String(e && e.message ? e.message : e),
           });
         }
       }
 
-      // KEY SYSTEM
+            // KEY SYSTEM
       if (request.method === "GET" && path.startsWith("/get-key/token/")) {
         const token = decodeURIComponent(path.slice("/get-key/token/".length));
         return await handleGetKeyToken(request, env, token);
