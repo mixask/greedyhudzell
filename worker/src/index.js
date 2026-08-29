@@ -35,6 +35,9 @@ const GAMEPASS_STORE = {
   year: "https://www.roblox.com/game-pass/1966320456",
 };
 const DISCORD_REDEEM_CHANNEL = "https://discord.com/channels/1422222409846620201/1448630361390055454";
+const DISCORD_INVITE = "https://discord.gg/sbVuaT9a2T";
+const FREE_KEY_LINK = "https://work.ink/28wp/Greedy-hudzell";
+
 const REDEEM_SUPPORT_HINT =
   "If you bought the Game Pass but could not redeem it, write in Discord: https://discord.com/channels/1422222409846620201/1448630361390055454";
 
@@ -1222,6 +1225,11 @@ async function callLuaObf(apiKey, code, cfg) {
 
 /** Full pipeline used by /api/obfuscate */
 async function runObfuscatePipeline(code, preset, apiKey, options) {
+  // UI levels → internal modes
+  if (preset === "minimum") preset = "local";
+  else if (preset === "good") preset = "safe";
+  else if (preset === "excellent") preset = "standard";
+  else if (preset === "all" || preset === "all_plugins") preset = "custom";
   // 1) always process long-bracket *contents* first (user request)
   let stage = processLongBrackets(code);
 
@@ -1294,127 +1302,129 @@ async function runObfuscatePipeline(code, preset, apiKey, options) {
 }
 
 function obfuscatePage(siteName) {
-  const name = siteName || "Greedy Hudzell";
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${name} · Obfuscator</title>
-<style>
-:root{--bg:#0a0906;--card:#12100a;--gold:#c9a227;--text:#ffeebf;--muted:#9a8555;--line:#2a2410}
-*{box-sizing:border-box}
-body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-a{color:var(--gold)}
-.wrap{max-width:960px;margin:0 auto;padding:24px 16px 48px}
-h1{font-size:1.4rem;margin:0 0 8px}
-.muted{color:var(--muted);font-size:.9rem}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin-top:16px}
-label{display:block;margin:10px 0 6px;color:var(--muted);font-size:.85rem}
-select,textarea,button{width:100%;border-radius:8px;border:1px solid var(--line);background:#0c0a05;color:var(--text);padding:10px;font-family:ui-monospace,monospace}
-textarea{min-height:220px;resize:vertical}
-button{cursor:pointer;background:linear-gradient(180deg,#3a3010,#2a2410);border-color:var(--gold);font-weight:600;margin-top:10px}
-button:hover{filter:brightness(1.08)}
-#status{margin-top:10px;font-size:.9rem}
-.ok{color:#8dcf8d}.err{color:#ff8a8a}
-.row{display:flex;gap:12px;flex-wrap:wrap}
-.row>*{flex:1;min-width:140px}
-.nav{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-.nav a{text-decoration:none;border:1px solid var(--line);padding:6px 10px;border-radius:999px;font-size:.85rem}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="nav">
-    <a href="/home">Home</a>
-    <a href="/pricing">Pricing</a>
-    <a href="/obfuscator">Obfuscator</a>
-    <a href="/status">Status</a>
-  </div>
-  <h1>${name} Obfuscator</h1>
-  <p class="muted">
-    Pipeline: process code inside long-brackets <code>[====[ ... ]====]</code> if present →
-    luaobfuscator safe plugins → optional Shamir control-flow helper → minify to <b>one line</b>.
-    Virtualize (VM) is optional and may break Luau — default is off.
-  </p>
+  return siteShell("Obfuscator", "obfuscator", `
+  <div class="badge">Tools</div>
+  <h1>Lua Obfuscator</h1>
+  <p class="sub">Long-bracket contents processed when present · safe API plugins · optional Shamir helper · one-line minify</p>
   <div class="card">
-    <div class="row">
-      <div>
-        <label>Preset</label>
-        <select id="preset">
-          <option value="standard" selected>Standard (API + one-line + Shamir runtime)</option>
-          <option value="safe">Safe (API: strings + table indirection)</option>
-          <option value="medium">Medium (API + light CF flatten)</option>
-          <option value="shamir">Shamir+API (same as standard)</option>
-          <option value="shamir_only">Shamir local only (no API)</option>
-          <option value="full">Heavy (API, no VM)</option>
-          <option value="vm">VM (API Virtualize — may break)</option>
-          <option value="local">Local minify + strings only</option>
-          <option value="custom">Custom plugins</option>
-        </select>
-      </div>
+    <label class="f">Level</label>
+    <select id="preset" class="f" style="width:100%;margin-bottom:12px;padding:10px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--border)">
+      <option value="minimum">Minimum — minify + string encode (local)</option>
+      <option value="good" selected>Good — API strings + table indirection + one-line</option>
+      <option value="excellent">Excellent — API + light control-flow + Shamir runtime</option>
+      <option value="custom">All plugins + Custom</option>
+    </select>
+    <div id="customBox" style="display:none;margin-bottom:12px">
+      <label class="f">Plugins</label>
+      <div id="plugins" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px"></div>
+      <label style="display:flex;gap:8px;align-items:center;margin-top:8px;color:var(--muted);font-size:13px">
+        <input type="checkbox" id="opt_vm"/> Include Virtualize (may break Luau)
+      </label>
     </div>
-    <div id="customBox" style="display:none;margin-top:8px">
-      <label>Custom plugins</label>
-      <div id="plugins" class="row"></div>
+    <label class="f">Source</label>
+    <textarea id="code" class="f" style="width:100%;min-height:220px;margin-bottom:10px;padding:12px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-family:ui-monospace,monospace" placeholder="Paste Lua source"></textarea>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      <button type="button" class="btn btn-gold" id="go">Obfuscate</button>
+      <button type="button" class="btn" id="copy">Copy output</button>
     </div>
-    <label>Lua source</label>
-    <textarea id="code" placeholder="paste Lua here"></textarea>
-    <button id="go" type="button">Obfuscate</button>
-    <div id="status"></div>
-    <label>Output</label>
-    <textarea id="out" readonly placeholder="result"></textarea>
-    <button id="copy" type="button">Copy output</button>
+    <p id="status" class="muted" style="margin-top:10px"></p>
+    <label class="f" style="margin-top:12px">Output</label>
+    <textarea id="out" readonly class="f" style="width:100%;min-height:180px;padding:12px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--border);font-family:ui-monospace,monospace"></textarea>
   </div>
-</div>
-<script>
-const PLUGIN_DEFS=[
-  {key:'EncryptStrings',label:'Encrypt Strings'},
-  {key:'SwizzleLookups',label:'Swizzle Lookups'},
-  {key:'TableIndirection',label:'Table Indirection'},
-  {key:'ControlFlowFlattenV1AllBlocks',label:'CF Flatten'},
-  {key:'MutateAllLiterals',label:'Mutate Literals'},
-  {key:'JunkifyAllIfStatements',label:'Junkify Ifs'},
-  {key:'MixedBooleanArithmetic',label:'MBA'}
-];
-const preset=document.getElementById('preset');
-const customBox=document.getElementById('customBox');
-const plugins=document.getElementById('plugins');
-PLUGIN_DEFS.forEach(p=>{
-  const id='p_'+p.key;
-  const lab=document.createElement('label');
-  lab.style.display='flex';lab.style.gap='6px';lab.style.alignItems='center';
-  lab.innerHTML='<input type="checkbox" id="'+id+'"/> '+p.label;
-  plugins.appendChild(lab);
-});
-preset.onchange=()=>{ customBox.style.display = preset.value==='custom' ? 'block' : 'none'; };
-function collectOptions(){
-  const o={};
-  PLUGIN_DEFS.forEach(p=>{ o[p.key]= !!document.getElementById('p_'+p.key)?.checked; });
-  return o;
+  <script>
+  (function(){
+    const PLUGIN_DEFS = [
+      {key:"EncryptStrings",label:"Encrypt Strings"},
+      {key:"SwizzleLookups",label:"Swizzle Lookups"},
+      {key:"TableIndirection",label:"Table Indirection"},
+      {key:"ControlFlowFlattenV1AllBlocks",label:"Control-flow flatten"},
+      {key:"RevertAllIfStatements",label:"Revert ifs"},
+      {key:"JunkifyAllIfStatements",label:"Junkify ifs"},
+      {key:"MixedBooleanArithmetic",label:"MBA"},
+      {key:"MutateAllLiterals",label:"Mutate literals"},
+      {key:"EncryptFuncDeclaration",label:"Encrypt func decl"},
+      {key:"DummyFunctionArgs",label:"Dummy args"}
+    ];
+    const preset = document.getElementById("preset");
+    const customBox = document.getElementById("customBox");
+    const plugins = document.getElementById("plugins");
+    PLUGIN_DEFS.forEach(function(p){
+      const lab = document.createElement("label");
+      lab.style.cssText = "display:flex;gap:6px;align-items:center;color:var(--muted);font-size:13px";
+      lab.innerHTML = '<input type="checkbox" id="p_'+p.key+'" checked/> '+p.label;
+      plugins.appendChild(lab);
+    });
+    preset.onchange = function(){
+      customBox.style.display = preset.value === "custom" ? "block" : "none";
+    };
+    function collectOptions(){
+      const o = { Virtualize: !!document.getElementById("opt_vm").checked };
+      PLUGIN_DEFS.forEach(function(p){
+        const el = document.getElementById("p_"+p.key);
+        o[p.key] = !!(el && el.checked);
+      });
+      return o;
+    }
+    document.getElementById("go").onclick = async function(){
+      const code = document.getElementById("code").value;
+      const statusEl = document.getElementById("status");
+      const out = document.getElementById("out");
+      if (!code || code.trim().length < 2) {
+        statusEl.className = "err";
+        statusEl.textContent = "Empty source";
+        return;
+      }
+      statusEl.className = "muted";
+      statusEl.textContent = "Working...";
+      out.value = "";
+      try {
+        const res = await fetch("/api/obfuscate", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ preset: preset.value, options: collectOptions(), code: code })
+        });
+        const data = await res.json();
+        if (!data.ok) {
+          statusEl.className = "err";
+          statusEl.textContent = data.error || res.status;
+          return;
+        }
+        out.value = data.code || "";
+        statusEl.className = "ok";
+        statusEl.textContent = "OK · " + (data.mode||"") + " · " + (data.code||"").length + " chars · " + (data.note||"");
+      } catch (e) {
+        statusEl.className = "err";
+        statusEl.textContent = String(e);
+      }
+    };
+    document.getElementById("copy").onclick = async function(){
+      try {
+        await navigator.clipboard.writeText(document.getElementById("out").value);
+        document.getElementById("status").className = "ok";
+        document.getElementById("status").textContent = "Copied";
+      } catch (e) {}
+    };
+  })();
+  </script>
+`, true);
 }
-document.getElementById('go').onclick=async()=>{
-  const code=document.getElementById('code').value;
-  const statusEl=document.getElementById('status');
-  const out=document.getElementById('out');
-  if(!code||code.trim().length<2){ statusEl.innerHTML='<span class="err">Empty source</span>'; return; }
-  statusEl.textContent='Working...';
-  out.value='';
-  try{
-    const res=await fetch('/api/obfuscate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({preset:preset.value,options:collectOptions(),code})});
-    const data=await res.json();
-    if(!data.ok){ statusEl.innerHTML='<span class="err">'+(data.error||res.status)+'</span>'; return; }
-    out.value=data.code||'';
-    statusEl.innerHTML='<span class="ok">OK · '+(data.mode||'')+' · '+(data.code||'').length+' chars · '+(data.note||'')+'</span>';
-  }catch(e){ statusEl.innerHTML='<span class="err">'+e+'</span>'; }
-};
-document.getElementById('copy').onclick=async()=>{
-  const t=document.getElementById('out').value;
-  try{ await navigator.clipboard.writeText(t); document.getElementById('status').innerHTML='<span class="ok">Copied</span>'; }catch(e){}
-};
 
-</script>
-</body></html>`;
+function siteNav(active) {
+  const items = [
+    ["home", "/home", "Home"],
+    ["pricing", "/pricing", "Pricing"],
+    ["obfuscator", "/obfuscator", "Obfuscator"],
+    ["executors", "/executors", "Executors"],
+    ["guide", "/guide", "Guide"],
+    ["status", "/status", "Status"],
+    ["tos", "/tos", "ToS"],
+  ];
+  return items
+    .map(([id, href, label]) => {
+      const cls = active === id ? ' class="active"' : "";
+      return "<a href=\"" + href + "\"" + cls + ">" + label + "</a>";
+    })
+    .join("");
 }
 
 function siteShell(title, active, bodyHtml, wide = false) {
