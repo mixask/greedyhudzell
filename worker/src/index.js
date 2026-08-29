@@ -898,6 +898,21 @@ function presetConfig(preset) {
       },
     };
   }
+  if (preset === "excellent") {
+    return {
+      MinifiyAll: true,
+      Virtualize: true,
+      CustomPlugins: {
+        SwizzleLookups: [100],
+        EncryptStrings: [100],
+        TableIndirection: [100],
+        ControlFlowFlattenV1AllBlocks: [75],
+        MutateAllLiterals: [40],
+        JunkifyAllIfStatements: [35],
+        RevertAllIfStatements: [40],
+      },
+    };
+  }
   if (preset === "full" || preset === "heavy") {
     return {
       MinifiyAll: true,
@@ -1228,7 +1243,7 @@ async function runObfuscatePipeline(code, preset, apiKey, options) {
   // UI levels → internal modes
   if (preset === "minimum") preset = "local";
   else if (preset === "good") preset = "safe";
-  else if (preset === "excellent") preset = "standard";
+  else if (preset === "excellent") preset = "excellent"; // keep name → Virtualize on
   else if (preset === "all" || preset === "all_plugins") preset = "custom";
   // 1) always process long-bracket *contents* first (user request)
   let stage = processLongBrackets(code);
@@ -1259,8 +1274,13 @@ async function runObfuscatePipeline(code, preset, apiKey, options) {
       ? buildConfigFromOptions(options || {})
       : presetConfig(preset);
 
-  // never force VM unless user picked vm
-  if (preset !== "vm") cfg.Virtualize = false;
+  // VM only for explicit presets (excellent / vm / full)
+  if (preset !== "vm" && preset !== "excellent" && preset !== "full") {
+    cfg.Virtualize = false;
+  }
+  if (preset === "excellent" || preset === "vm" || preset === "full") {
+    cfg.Virtualize = true;
+  }
   cfg.MinifiyAll = true;
 
   try {
@@ -1311,7 +1331,7 @@ function obfuscatePage(siteName) {
     <select id="preset" class="f" style="width:100%;margin-bottom:12px;padding:10px;border-radius:8px;background:var(--bg2);color:var(--text);border:1px solid var(--border)">
       <option value="minimum">Minimum — minify + string encode (local)</option>
       <option value="good" selected>Good — API strings + table indirection + one-line</option>
-      <option value="excellent">Excellent — API + light control-flow + Shamir runtime</option>
+      <option value="excellent">Excellent — API + control-flow + Virtual Machine + one-line</option>
       <option value="custom">All plugins + Custom</option>
     </select>
     <div id="customBox" style="display:none;margin-bottom:12px">
