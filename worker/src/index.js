@@ -328,13 +328,23 @@ async function handleGenerateKey(request, env) {
   if (existing) return json({ success: true, key: existing.key, already_generated: true });
   const key = generateKey();
   const timestamp = now();
-  await env.DB.prepare(
-    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
-     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
-  )
-    .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL, "day")
-    .run();
-  return json({ success: true, key, expires_at: timestamp + KEY_TTL });
+  try {
+    await env.DB.prepare(
+      `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
+       VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
+    )
+      .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL, "day")
+      .run();
+  } catch (e) {
+    console.error("generate-key activated insert:", String(e));
+    await env.DB.prepare(
+      `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
+       VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+    )
+      .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL, "day")
+      .run();
+  }
+  return json({ success: true, key, expires_at: timestamp + KEY_TTL, activated: 0 });
 }
 async function handleValidate(request, env) {
   if (request.method !== "POST") return json({ valid: false, reason: "method_not_allowed" }, 405);
@@ -517,12 +527,32 @@ async function handleAdminGenerate(request, env) {
   const expires = timestamp + planTtl(plan);
   const storedUser = username || ("pending_" + key.replace(/-/g, "").slice(0, 12));
 
-  await env.DB.prepare(
-    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
-     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
-  )
-    .bind(key, storedUser, "admin:" + timestamp, timestamp, expires, plan)
-    .run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
+       VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
+    )
+      .bind(key, storedUser, "admin:" + timestamp, timestamp, expires, plan)
+      .run();
+  } catch (e) {
+    // D1 without activated column yet
+    console.error("admin generate insert (activated):", String(e));
+    try {
+      await env.DB.prepare(
+        `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
+         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+      )
+        .bind(key, storedUser, "admin:" + timestamp, timestamp, expires, plan)
+        .run();
+    } catch (e2) {
+      console.error("admin generate insert:", String(e2));
+      return json({
+        success: false,
+        reason: "db_error",
+        message: String(e2 && e2.message ? e2.message : e2),
+      }, 500);
+    }
+  }
 
   return json({
     success: true,
@@ -531,6 +561,7 @@ async function handleAdminGenerate(request, env) {
     expires_at: expires,
     username: username || null,
     pending: !username,
+    activated: 0,
   });
 }
 /** Extend key by N days (un-revokes) */
