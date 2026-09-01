@@ -1887,10 +1887,25 @@ function isPaidPlan(plan, key) {
   if (typeof key === "string" && key.startsWith("GH-PAID-")) return true;
   return false;
 }
+function getDiscordBotToken(env) {
+  return (
+    env.DISCORD_BOT_TOKEN ||
+    env.DISCORD_TOKEN ||
+    env.BOT_TOKEN ||
+    ""
+  );
+}
 async function discordApi(env, method, path, body) {
-  const token = env.DISCORD_BOT_TOKEN;
+  const token = getDiscordBotToken(env);
   if (!token) {
-    return { ok: false, status: 500, data: { message: "DISCORD_BOT_TOKEN not set" } };
+    return {
+      ok: false,
+      status: 500,
+      data: {
+        message: "DISCORD_BOT_TOKEN not set",
+        hint: "Set secret DISCORD_BOT_TOKEN (or DISCORD_TOKEN) on the Worker that serves greedyhudzell.xyz",
+      },
+    };
   }
   const res = await fetch(`https://discord.com/api/v10${path}`, {
     method,
@@ -1928,6 +1943,20 @@ function avatarUrlFromUser(user) {
   }
   return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
 }
+
+async function handleDiscordDebug(request, env) {
+  const token = getDiscordBotToken(env);
+  return json({
+    ok: true,
+    has_token: Boolean(token),
+    token_len: token ? token.length : 0,
+    token_prefix: token ? String(token).slice(0, 4) + "…" : null,
+    guild_id: env.DISCORD_GUILD_ID || "1422222409846620201",
+    member_role: env.DISCORD_MEMBER_ROLE || "1445500571640402052",
+    source_names_checked: ["DISCORD_BOT_TOKEN", "DISCORD_TOKEN", "BOT_TOKEN"],
+  });
+}
+
 async function handleDiscordProfile(request, env) {
   if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
   let body;
@@ -1940,6 +1969,26 @@ async function handleDiscordProfile(request, env) {
   if (!discordId || discordId.length < 16) {
     return json({ ok: false, error: "invalid_discord_id" }, 400);
   }
+  const token = getDiscordBotToken(env);
+  // Without bot token: still return default embed avatar so client can test getcustomasset
+  if (!token) {
+    let idx = 0;
+    try {
+      idx = Number((BigInt(discordId) >> 22n) % 6n);
+    } catch {
+      idx = 0;
+    }
+    return json({
+      ok: true,
+      id: discordId,
+      username: null,
+      global_name: null,
+      discriminator: "0",
+      avatar_url: `https://cdn.discordapp.com/embed/avatars/${idx}.png`,
+      partial: true,
+      warning: "DISCORD_BOT_TOKEN not visible on this Worker — using default avatar only. Set secret on the Worker bound to greedyhudzell.xyz",
+    });
+  }
   const api = await discordApi(env, "GET", `/users/${discordId}`);
   if (!api.ok) {
     return json(
@@ -1948,6 +1997,14 @@ async function handleDiscordProfile(request, env) {
         error: "discord_users_http",
         status: api.status,
         details: api.data,
+        hint:
+          api.status === 401
+            ? "Invalid DISCORD_BOT_TOKEN"
+            : api.status === 404
+              ? "Unknown Discord user id"
+              : api.status === 429
+                ? "Discord rate limited — retry later"
+                : "Discord API rejected the request",
       },
       api.status === 404 ? 404 : 502
     );
@@ -1960,6 +2017,7 @@ async function handleDiscordProfile(request, env) {
     global_name: user.global_name || null,
     discriminator: user.discriminator || "0",
     avatar_url: avatarUrlFromUser(user),
+    partial: false,
   });
 }
 async function handleDiscordVerifyKey(request, env) {
@@ -2199,6 +2257,9 @@ export default {
       
 
       // DISCORD LINK
+      if (request.method === "GET" && path === "/api/discord/debug") {
+        return await handleDiscordDebug(request, env);
+      }
       if (request.method === "POST" && path === "/api/discord/profile") {
         return await handleDiscordProfile(request, env);
       }
