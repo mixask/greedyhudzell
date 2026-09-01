@@ -329,8 +329,8 @@ async function handleGenerateKey(request, env) {
   const key = generateKey();
   const timestamp = now();
   await env.DB.prepare(
-    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
-     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
+     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
   )
     .bind(key, username, sessionId, timestamp, timestamp + KEY_TTL, "day")
     .run();
@@ -346,25 +346,72 @@ async function handleValidate(request, env) {
   }
   const key = typeof body.key === "string" ? body.key.trim() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
+  const discordId = String(body.discord_id || body.discordId || "").replace(/\D/g, "") || null;
   if (!key || !username) return json({ valid: false, reason: "missing_key_or_username" });
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
   if (!record) return json({ valid: false, reason: "invalid_key" });
   if (record.revoked === 1) return json({ valid: false, reason: "revoked" });
-  if (record.expires_at <= now()) return json({ valid: false, reason: "expired" });
+  if (Number(record.expires_at) <= now()) return json({ valid: false, reason: "expired" });
+
+  // Keys start inactive; Discord Verify sets activated = 1
+  // Legacy rows: activated NULL → allow if already executed/discord linked
+  const act = record.activated;
+  if (act === 0 || act === "0") {
+    return json({
+      valid: false,
+      reason: "not_activated",
+      message: "Key is inactive. Use Verify in Discord to activate.",
+    });
+  }
+
+  // Roblox username bind: pending_* can claim once; otherwise must match
+  const isPending = String(record.username || "").startsWith("pending_");
   if (record.username !== username) {
-    const isPending = String(record.username || "").startsWith("pending_");
     if (isPending) {
-      await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+      try {
+        await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+      } catch {
+        return json({ valid: false, reason: "bind_failed" });
+      }
     } else {
-      return json({ valid: false, reason: "username_mismatch" });
+      return json({
+        valid: false,
+        reason: "username_mismatch",
+        bound_username: record.username,
+        message: "Key is bound to another Roblox account. Paid keys can /rewire.",
+      });
     }
   }
+
+  // Discord bind: if key already has discord_id, client must send the same one
+  if (record.discord_id) {
+    if (discordId && String(record.discord_id) !== discordId) {
+      return json({
+        valid: false,
+        reason: "discord_mismatch",
+        message: "Key is bound to another Discord account",
+      });
+    }
+  } else if (discordId) {
+    // first time: attach discord_id if column exists
+    try {
+      await env.DB.prepare(`UPDATE keys SET discord_id = ? WHERE key = ?`).bind(discordId, key).run();
+    } catch (_) {}
+  }
+
   const timestamp = now();
   await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`).bind(timestamp, key).run();
+
+  let discordBound = record.discord_id || discordId || null;
   return json({
     valid: true,
     expires_at: record.expires_at,
     plan: record.plan || "day",
+    username: username,
+    discord_id: discordBound,
+    discord_linked: Boolean(discordBound),
+    paid: isPaidPlan(record.plan, key),
+    rewire_allowed: isPaidPlan(record.plan, key),
   });
 }
 /* ===================== ADMIN ===================== */
@@ -471,8 +518,8 @@ async function handleAdminGenerate(request, env) {
   const storedUser = username || ("pending_" + key.replace(/-/g, "").slice(0, 12));
 
   await env.DB.prepare(
-    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
-     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+    `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
+     VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
   )
     .bind(key, storedUser, "admin:" + timestamp, timestamp, expires, plan)
     .run();
@@ -808,8 +855,8 @@ async function handleRedeemGamepass(request, env) {
   try {
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan)
-         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?)`
+        `INSERT INTO keys (key, username, session_id, created_at, expires_at, revoked, executed, last_execution, plan, activated)
+         VALUES (?, ?, ?, ?, ?, 0, 0, NULL, ?, 0)`
       ).bind(key, user.name || username, "pass:" + gamepassId, timestamp, expires, plan),
       env.DB.prepare(
         `INSERT INTO pass_redemptions (user_id, username, gamepass_id, plan, key_value, created_at)
@@ -2047,17 +2094,42 @@ async function handleDiscordVerifyKey(request, env) {
     if (isPending) {
       await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
     } else {
-      return json({ ok: false, error: "username_mismatch", reason: "username_mismatch" }, 403);
+      return json({
+        ok: false,
+        error: "username_mismatch",
+        reason: "username_mismatch",
+        bound_username: record.username,
+        message: "Key already bound to another Roblox user",
+      }, 403);
     }
   }
+  // Discord: lock 1 key ↔ 1 discord (unless unpaid first link)
+  if (record.discord_id && String(record.discord_id) !== discordId) {
+    return json({
+      ok: false,
+      error: "discord_mismatch",
+      reason: "discord_mismatch",
+      message: "Key already linked to another Discord account",
+    }, 403);
+  }
   try {
-    await env.DB.prepare(`UPDATE keys SET discord_id = ?, executed = 1, last_execution = ? WHERE key = ?`)
+    await env.DB.prepare(
+      `UPDATE keys SET discord_id = ?, executed = 1, activated = 1, last_execution = ? WHERE key = ?`
+    )
       .bind(discordId, now(), key)
       .run();
   } catch {
-    await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`)
-      .bind(now(), key)
-      .run();
+    try {
+      await env.DB.prepare(
+        `UPDATE keys SET executed = 1, activated = 1, last_execution = ? WHERE key = ?`
+      )
+        .bind(now(), key)
+        .run();
+    } catch {
+      await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`)
+        .bind(now(), key)
+        .run();
+    }
   }
   const guildId = env.DISCORD_GUILD_ID || "1422222409846620201";
   const roleId = env.DISCORD_MEMBER_ROLE || "1445500571640402052";
@@ -2087,12 +2159,14 @@ async function handleDiscordVerifyKey(request, env) {
     expires_at: record.expires_at,
     role_given: roleGiven,
     role_error: roleError,
+    activated: true,
     paid: isPaidPlan(record.plan, key),
     message: roleGiven
-      ? "Key enabled and Member role granted"
-      : "Key enabled; role not granted (see role_error)",
+      ? "Key activated and Member role granted"
+      : "Key activated; role not granted (see role_error)",
   });
 }
+
 async function handleDiscordRewire(request, env) {
   if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
   let body;
