@@ -1879,6 +1879,221 @@ function tosPage() {
 }
 
 /* ===================== ROUTER ===================== */
+
+/* ===================== DISCORD LINK (profile / verify-key / rewire) ===================== */
+function isPaidPlan(plan, key) {
+  const p = String(plan || "").toLowerCase();
+  if (p === "week" || p === "month" || p === "year" || p === "paid") return true;
+  if (typeof key === "string" && key.startsWith("GH-PAID-")) return true;
+  return false;
+}
+async function discordApi(env, method, path, body) {
+  const token = env.DISCORD_BOT_TOKEN;
+  if (!token) {
+    return { ok: false, status: 500, data: { message: "DISCORD_BOT_TOKEN not set" } };
+  }
+  const res = await fetch(`https://discord.com/api/v10${path}`, {
+    method,
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json",
+      "User-Agent": "GreedyHudzellWorker (https://greedyhudzell.xyz, 1.0)",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let data = null;
+  const textBody = await res.text();
+  try {
+    data = textBody ? JSON.parse(textBody) : null;
+  } catch {
+    data = { raw: textBody };
+  }
+  return { ok: res.ok, status: res.status, data };
+}
+function avatarUrlFromUser(user) {
+  if (!user || !user.id) return null;
+  if (user.avatar) {
+    const ext = user.avatar.startsWith("a_") ? "gif" : "png";
+    return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.${ext}?size=128`;
+  }
+  let idx = 0;
+  try {
+    if (user.discriminator && user.discriminator !== "0") {
+      idx = Number(user.discriminator) % 5;
+    } else {
+      idx = Number((BigInt(user.id) >> 22n) % 6n);
+    }
+  } catch {
+    idx = 0;
+  }
+  return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
+}
+async function handleDiscordProfile(request, env) {
+  if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "invalid_json" }, 400);
+  }
+  const discordId = String(body.discord_id || body.discordId || "").replace(/\D/g, "");
+  if (!discordId || discordId.length < 16) {
+    return json({ ok: false, error: "invalid_discord_id" }, 400);
+  }
+  const api = await discordApi(env, "GET", `/users/${discordId}`);
+  if (!api.ok) {
+    return json(
+      {
+        ok: false,
+        error: "discord_users_http",
+        status: api.status,
+        details: api.data,
+      },
+      api.status === 404 ? 404 : 502
+    );
+  }
+  const user = api.data;
+  return json({
+    ok: true,
+    id: user.id,
+    username: user.username,
+    global_name: user.global_name || null,
+    discriminator: user.discriminator || "0",
+    avatar_url: avatarUrlFromUser(user),
+  });
+}
+async function handleDiscordVerifyKey(request, env) {
+  if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username =
+    typeof body.roblox_username === "string"
+      ? body.roblox_username.trim()
+      : typeof body.username === "string"
+        ? body.username.trim()
+        : "";
+  const discordId = String(body.discord_id || body.discordId || "").replace(/\D/g, "");
+  if (!key || !username) return json({ ok: false, error: "missing_key_or_username" }, 400);
+  if (!discordId || discordId.length < 16) return json({ ok: false, error: "invalid_discord_id" }, 400);
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ ok: false, error: "invalid_key", reason: "invalid_key" });
+  if (record.revoked === 1) return json({ ok: false, error: "revoked", reason: "revoked" });
+  if (Number(record.expires_at) <= now()) return json({ ok: false, error: "expired", reason: "expired" });
+  const isPending = String(record.username || "").startsWith("pending_");
+  if (record.username !== username) {
+    if (isPending) {
+      await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+    } else {
+      return json({ ok: false, error: "username_mismatch", reason: "username_mismatch" }, 403);
+    }
+  }
+  try {
+    await env.DB.prepare(`UPDATE keys SET discord_id = ?, executed = 1, last_execution = ? WHERE key = ?`)
+      .bind(discordId, now(), key)
+      .run();
+  } catch {
+    await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`)
+      .bind(now(), key)
+      .run();
+  }
+  const guildId = env.DISCORD_GUILD_ID || "1422222409846620201";
+  const roleId = env.DISCORD_MEMBER_ROLE || "1445500571640402052";
+  const rolePut = await discordApi(
+    env,
+    "PUT",
+    `/guilds/${guildId}/members/${discordId}/roles/${roleId}`,
+    null
+  );
+  let roleGiven = rolePut.ok || rolePut.status === 204;
+  let roleError = null;
+  if (!roleGiven) {
+    roleError = {
+      status: rolePut.status,
+      details: rolePut.data,
+      hint:
+        rolePut.status === 404
+          ? "User not in guild — join Discord first"
+          : rolePut.status === 403
+            ? "Bot missing Manage Roles or role hierarchy"
+            : "Discord API error",
+    };
+  }
+  return json({
+    ok: true,
+    plan: record.plan || "day",
+    expires_at: record.expires_at,
+    role_given: roleGiven,
+    role_error: roleError,
+    paid: isPaidPlan(record.plan, key),
+    message: roleGiven
+      ? "Key enabled and Member role granted"
+      : "Key enabled; role not granted (see role_error)",
+  });
+}
+async function handleDiscordRewire(request, env) {
+  if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username =
+    typeof body.roblox_username === "string"
+      ? body.roblox_username.trim()
+      : typeof body.username === "string"
+        ? body.username.trim()
+        : "";
+  const discordId = String(body.discord_id || body.discordId || "").replace(/\D/g, "");
+  if (!key) return json({ ok: false, error: "missing_key" }, 400);
+  if (username.length < 3 || username.length > 20 || !/^[A-Za-z0-9_]+$/.test(username)) {
+    return json({ ok: false, error: "invalid_username" }, 400);
+  }
+  const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
+  if (!record) return json({ ok: false, error: "key_not_found" }, 404);
+  if (record.revoked === 1) return json({ ok: false, error: "revoked" }, 400);
+  if (Number(record.expires_at) <= now()) return json({ ok: false, error: "expired" }, 400);
+  if (!isPaidPlan(record.plan, key)) {
+    return json({
+      ok: false,
+      error: "rewire_only_paid",
+      reason: "rewire_only_paid",
+      message: "Rewire is only for week/month/year (or GH-PAID-*) keys",
+    }, 403);
+  }
+  if (record.discord_id && discordId && String(record.discord_id) !== discordId) {
+    return json({ ok: false, error: "discord_mismatch" }, 403);
+  }
+  const previous = record.username;
+  try {
+    if (discordId) {
+      await env.DB.prepare(`UPDATE keys SET username = ?, discord_id = ? WHERE key = ?`)
+        .bind(username, discordId, key)
+        .run();
+    } else {
+      await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+    }
+  } catch {
+    await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+  }
+  return json({
+    ok: true,
+    key,
+    previous_username: previous,
+    username,
+    plan: record.plan || "paid",
+    expires_at: record.expires_at,
+    message: "Key rewired",
+  });
+}
+
+
 export default {
   async fetch(request, env) {
     try {
@@ -1982,6 +2197,18 @@ export default {
         return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
       }
       
+
+      // DISCORD LINK
+      if (request.method === "POST" && path === "/api/discord/profile") {
+        return await handleDiscordProfile(request, env);
+      }
+      if (request.method === "POST" && path === "/api/discord/verify-key") {
+        return await handleDiscordVerifyKey(request, env);
+      }
+      if (request.method === "POST" && path === "/api/discord/rewire") {
+        return await handleDiscordRewire(request, env);
+      }
+
       return json({ error: "Not found" }, 404);
     } catch (error) {
       console.error("Worker error:", error);
