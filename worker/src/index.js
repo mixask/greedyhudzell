@@ -2156,6 +2156,7 @@ async function handleDiscordVerifyKey(request, env) {
     return json({ ok: false, error: "invalid_json" }, 400);
   }
   const key = typeof body.key === "string" ? body.key.trim() : "";
+  // Roblox username optional on Discord verify (bound later by loader /validate)
   const username =
     typeof body.roblox_username === "string"
       ? body.roblox_username.trim()
@@ -2163,17 +2164,18 @@ async function handleDiscordVerifyKey(request, env) {
         ? body.username.trim()
         : "";
   const discordId = String(body.discord_id || body.discordId || "").replace(/\D/g, "");
-  if (!key || !username) return json({ ok: false, error: "missing_key_or_username" }, 400);
+  if (!key) return json({ ok: false, error: "missing_key" }, 400);
   if (!discordId || discordId.length < 16) return json({ ok: false, error: "invalid_discord_id" }, 400);
+
   const record = await env.DB.prepare(`SELECT * FROM keys WHERE key = ? LIMIT 1`).bind(key).first();
   if (!record) return json({ ok: false, error: "invalid_key", reason: "invalid_key" });
   if (record.revoked === 1) return json({ ok: false, error: "revoked", reason: "revoked" });
   if (Number(record.expires_at) <= now()) return json({ ok: false, error: "expired", reason: "expired" });
-  const isPending = String(record.username || "").startsWith("pending_");
-  if (record.username !== username) {
-    if (isPending) {
-      await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
-    } else {
+
+  // Optional username bind (only if provided)
+  if (username) {
+    const isPending = String(record.username || "").startsWith("pending_");
+    if (record.username && record.username !== username && !isPending) {
       return json({
         ok: false,
         error: "username_mismatch",
@@ -2182,8 +2184,14 @@ async function handleDiscordVerifyKey(request, env) {
         message: "Key already bound to another Roblox user",
       }, 403);
     }
+    if (isPending || !record.username) {
+      try {
+        await env.DB.prepare(`UPDATE keys SET username = ? WHERE key = ?`).bind(username, key).run();
+      } catch (_) {}
+    }
   }
-  // Discord: lock 1 key ↔ 1 discord (unless unpaid first link)
+
+  // Discord lock: key may only belong to one Discord account
   if (record.discord_id && String(record.discord_id) !== discordId) {
     return json({
       ok: false,
@@ -2192,58 +2200,88 @@ async function handleDiscordVerifyKey(request, env) {
       message: "Key already linked to another Discord account",
     }, 403);
   }
+
+  // Always allow re-activation (same key or new key for same Discord).
+  // activated can be flipped 0→1 any number of times for valid non-revoked keys.
+  const ts = now();
   try {
     await env.DB.prepare(
-      `UPDATE keys SET discord_id = ?, executed = 1, activated = 1, last_execution = ? WHERE key = ?`
+      `UPDATE keys SET discord_id = ?, activated = 1, last_execution = ? WHERE key = ?`
     )
-      .bind(discordId, now(), key)
+      .bind(discordId, ts, key)
       .run();
   } catch {
     try {
       await env.DB.prepare(
-        `UPDATE keys SET executed = 1, activated = 1, last_execution = ? WHERE key = ?`
+        `UPDATE keys SET activated = 1, last_execution = ? WHERE key = ?`
       )
-        .bind(now(), key)
+        .bind(ts, key)
         .run();
     } catch {
-      await env.DB.prepare(`UPDATE keys SET executed = 1, last_execution = ? WHERE key = ?`)
-        .bind(now(), key)
-        .run();
+      try {
+        await env.DB.prepare(`UPDATE keys SET last_execution = ? WHERE key = ?`).bind(ts, key).run();
+      } catch (_) {}
     }
   }
+
+  // Member role: only grant if missing (first time)
   const guildId = env.DISCORD_GUILD_ID || "1422222409846620201";
   const roleId = env.DISCORD_MEMBER_ROLE || "1445500571640402052";
-  const rolePut = await discordApi(
-    env,
-    "PUT",
-    `/guilds/${guildId}/members/${discordId}/roles/${roleId}`,
-    null
-  );
-  let roleGiven = rolePut.ok || rolePut.status === 204;
+  let roleGiven = false;
+  let roleAlready = false;
   let roleError = null;
-  if (!roleGiven) {
+
+  const memberGet = await discordApi(env, "GET", `/guilds/${guildId}/members/${discordId}`, null);
+  if (memberGet.ok && memberGet.data && Array.isArray(memberGet.data.roles)) {
+    roleAlready = memberGet.data.roles.map(String).includes(String(roleId));
+  } else if (memberGet.status === 404) {
     roleError = {
-      status: rolePut.status,
-      details: rolePut.data,
-      hint:
-        rolePut.status === 404
-          ? "User not in guild — join Discord first"
-          : rolePut.status === 403
-            ? "Bot missing Manage Roles or role hierarchy"
-            : "Discord API error",
+      status: 404,
+      hint: "User not in guild — join Discord first",
+      details: memberGet.data,
     };
   }
+
+  if (!roleAlready && !roleError) {
+    const rolePut = await discordApi(
+      env,
+      "PUT",
+      `/guilds/${guildId}/members/${discordId}/roles/${roleId}`,
+      null
+    );
+    roleGiven = rolePut.ok || rolePut.status === 204;
+    if (!roleGiven) {
+      roleError = {
+        status: rolePut.status,
+        details: rolePut.data,
+        hint:
+          rolePut.status === 404
+            ? "User not in guild — join Discord first"
+            : rolePut.status === 403
+              ? "Bot missing Manage Roles or role hierarchy"
+              : "Discord API error",
+      };
+    }
+  }
+
+  const wasAlreadyActive = record.activated === 1 || record.activated === "1";
   return json({
     ok: true,
+    success: true,
+    valid: true,
     plan: record.plan || "day",
     expires_at: record.expires_at,
     role_given: roleGiven,
+    role_already: roleAlready,
     role_error: roleError,
     activated: true,
+    reactivated: wasAlreadyActive,
     paid: isPaidPlan(record.plan, key),
     message: roleGiven
-      ? "Key activated and Member role granted"
-      : "Key activated; role not granted (see role_error)",
+      ? "Key activated. Member role granted (first time)."
+      : roleAlready
+        ? "Key activated. Member role already present."
+        : "Key activated." + (roleError ? " Role not granted." : ""),
   });
 }
 
