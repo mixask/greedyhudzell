@@ -42,8 +42,16 @@ const REDEEM_SUPPORT_HINT =
   "If you bought the Game Pass but could not redeem it, write in Discord: https://discord.com/channels/1422222409846620201/1448630361390055454";
 
 const GH = "https://raw.githubusercontent.com/mixask/GH/main";
-const LUAOBF_NEW = "https://luaobfuscator.com/api/obfuscator/newscript";
-const LUAOBF_RUN = "https://luaobfuscator.com/api/obfuscator/obfuscate";
+const LUAOBF_ENDPOINTS = [
+  {
+    newscript: "https://luaobfuscator.com/api/obfuscator/newscript",
+    obfuscate: "https://luaobfuscator.com/api/obfuscator/obfuscate",
+  },
+  {
+    newscript: "https://api.luaobfuscator.com/v1/obfuscator/newscript",
+    obfuscate: "https://api.luaobfuscator.com/v1/obfuscator/obfuscate",
+  },
+];
 const LUAOBF_FALLBACK = "11ad3847-d943-4a76-ee19-f9acab3e85144ea9";
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
@@ -1264,11 +1272,11 @@ function withTimeout(promise, ms) {
   ]);
 }
 
-async function callLuaObf(apiKey, code, cfg) {
-  const newRes = await fetch(LUAOBF_NEW, {
+async function callLuaObfOnce(apiKey, code, cfg, ep) {
+  const newRes = await fetch(ep.newscript, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
+      "Content-Type": "text/plain; charset=utf-8",
       apikey: apiKey,
     },
     body: code,
@@ -1279,41 +1287,81 @@ async function callLuaObf(apiKey, code, cfg) {
     newJson = JSON.parse(newText);
   } catch (_) {}
   const sessionId =
-    (newJson && newJson.sessionId) ||
+    (newJson && (newJson.sessionId || newJson.sessionid)) ||
     newRes.headers.get("sessionId") ||
     newRes.headers.get("sessionid");
   if (!sessionId) {
     return {
       ok: false,
-      error: `newscript failed HTTP ${newRes.status}: ${(newText || "").slice(0, 240)}`,
+      error: `newscript ${ep.newscript} HTTP ${newRes.status}: ${(newText || "").slice(0, 200)}`,
     };
   }
-  const runRes = await fetch(LUAOBF_RUN, {
+  const runRes = await fetch(ep.obfuscate, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: apiKey,
-      sessionId: sessionId,
+      sessionId: String(sessionId),
     },
     body: JSON.stringify(cfg),
   });
   const t = await runRes.text();
-  if (!runRes.ok) {
-    return { ok: false, error: `obfuscate HTTP ${runRes.status}: ${t.slice(0, 300)}` };
-  }
   let data = null;
   try {
     data = JSON.parse(t);
   } catch (_) {
-    return { ok: false, error: "obfuscate: invalid JSON" };
+    return { ok: false, error: `obfuscate invalid JSON HTTP ${runRes.status}: ${t.slice(0, 200)}` };
+  }
+  if (!runRes.ok) {
+    return {
+      ok: false,
+      error: `obfuscate HTTP ${runRes.status}: ${String(data.message || data.error || t).slice(0, 280)}`,
+    };
   }
   if (data.message && !data.code) {
     return { ok: false, error: String(data.message) };
   }
-  if (!data.code) {
+  if (!data.code || typeof data.code !== "string") {
     return { ok: false, error: "obfuscate: empty code" };
   }
-  return { ok: true, code: data.code, sessionId };
+  // Detect broken upstream VM (IronBrew / missing assemblies)
+  const head = data.code.slice(0, 200);
+  if (/IronBrew|FileNotFoundException|System\.IO\.Pipes/i.test(data.code) ||
+      /IronBrew|FileNotFoundException|System\.IO\.Pipes/i.test(String(data.message || ""))) {
+    return { ok: false, error: "upstream VM broken (IronBrew)" };
+  }
+  return { ok: true, code: data.code, sessionId: String(sessionId), endpoint: ep.newscript };
+}
+
+async function callLuaObf(apiKey, code, cfg) {
+  // Prefer non-VM config when Virtualize fails upstream
+  const attempts = [];
+  attempts.push(cfg);
+  if (cfg && cfg.Virtualize) {
+    attempts.push({
+      ...cfg,
+      Virtualize: false,
+      CustomPlugins: { ...(cfg.CustomPlugins || {}) },
+    });
+  }
+  let lastErr = "no endpoints";
+  for (const ep of LUAOBF_ENDPOINTS) {
+    for (const tryCfg of attempts) {
+      try {
+        const r = await withTimeout(callLuaObfOnce(apiKey, code, tryCfg, ep), 28000);
+        if (r.ok) {
+          if (tryCfg.Virtualize === false && cfg.Virtualize) {
+            r.note = "API without Virtualize (VM upstream broken)";
+          }
+          return r;
+        }
+        lastErr = r.error || lastErr;
+      } catch (e) {
+        lastErr = String(e && e.message ? e.message : e);
+      }
+    }
+  }
+  return { ok: false, error: lastErr };
 }
 
 /** Full pipeline used by /api/obfuscate */
@@ -1382,19 +1430,20 @@ async function runObfuscatePipeline(code, preset, apiKey, options) {
       };
     }
     const err = (result && result.error) || "api failed";
-    const level = preset === "full" || preset === "heavy" ? 2 : 2;
+    const short = String(err).replace(/\s+/g, " ").slice(0, 160);
+    // Stronger local when API/VM is down
     return {
       ok: true,
-      code: localObfuscate(code, level),
+      code: localObfuscate(code, 2),
       mode: preset + "_local",
-      note: "API fail → local: " + err,
+      note: "API fail → local JS: " + short,
     };
   } catch (e) {
     return {
       ok: true,
       code: localObfuscate(code, 2),
       mode: preset + "_local",
-      note: "API error → local: " + String(e && e.message ? e.message : e),
+      note: "API error → local JS: " + String(e && e.message ? e.message : e).slice(0, 160),
     };
   }
 }
