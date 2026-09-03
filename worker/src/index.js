@@ -2147,6 +2147,162 @@ async function handleDiscordProfile(request, env) {
     partial: false,
   });
 }
+
+/* ===== Discord OAuth (identify + guilds) for server verify =====
+ * Secrets: DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN (for role assign optional)
+ * Vars: OAUTH_REDIRECT = https://greedyhudzell.xyz/api/discord/oauth/callback
+ * D1: run migration discord_oauth table
+ */
+const OAUTH_SCOPES = "identify guilds";
+
+function oauthRedirectUri(env, request) {
+  if (env.OAUTH_REDIRECT) return env.OAUTH_REDIRECT;
+  const u = new URL(request.url);
+  return `${u.origin}/api/discord/oauth/callback`;
+}
+
+async function ensureOauthTable(env) {
+  if (!env.DB) return;
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS discord_oauth (
+        discord_id TEXT PRIMARY KEY,
+        guild_ids TEXT NOT NULL,
+        access_token TEXT,
+        updated_at INTEGER NOT NULL
+      )`
+    ).run();
+  } catch (e) {
+    console.error("oauth table:", e);
+  }
+}
+
+async function handleOauthStart(request, env) {
+  const url = new URL(request.url);
+  const discordId = String(url.searchParams.get("discord_id") || "").replace(/\D/g, "");
+  if (!discordId || discordId.length < 16) {
+    return json({ ok: false, error: "missing_discord_id" }, 400);
+  }
+  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
+  if (!clientId) return json({ ok: false, error: "DISCORD_CLIENT_ID not set" }, 500);
+  const redirect = oauthRedirectUri(env, request);
+  const state = discordId; // simple state = discord snowflake
+  const auth = new URL("https://discord.com/api/oauth2/authorize");
+  auth.searchParams.set("client_id", clientId);
+  auth.searchParams.set("redirect_uri", redirect);
+  auth.searchParams.set("response_type", "code");
+  auth.searchParams.set("scope", OAUTH_SCOPES);
+  auth.searchParams.set("state", state);
+  auth.searchParams.set("prompt", "consent");
+  return Response.redirect(auth.toString(), 302);
+}
+
+async function handleOauthCallback(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = String(url.searchParams.get("state") || "").replace(/\D/g, "");
+  const err = url.searchParams.get("error");
+  if (err) {
+    return html(`<h1>Authorization failed</h1><p>${err}</p><p>You can close this tab.</p>`, 400);
+  }
+  if (!code || !state) {
+    return html(`<h1>Missing code</h1><p>Try again from Discord.</p>`, 400);
+  }
+  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
+  const clientSecret = env.DISCORD_CLIENT_SECRET || env.CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    return html(`<h1>Server misconfigured</h1><p>CLIENT_ID / CLIENT_SECRET</p>`, 500);
+  }
+  const redirect = oauthRedirectUri(env, request);
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirect,
+  });
+  const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const tokenJson = await tokenRes.json().catch(() => ({}));
+  if (!tokenRes.ok || !tokenJson.access_token) {
+    return html(
+      `<h1>Token exchange failed</h1><pre>${JSON.stringify(tokenJson).slice(0, 400)}</pre>`,
+      502
+    );
+  }
+  const access = tokenJson.access_token;
+  // Confirm identity
+  const meRes = await fetch("https://discord.com/api/users/@me", {
+    headers: { Authorization: `Bearer ${access}` },
+  });
+  const me = await meRes.json().catch(() => ({}));
+  const meId = String(me.id || "");
+  if (!meId || meId !== state) {
+    return html(
+      `<h1>Account mismatch</h1><p>Authorized Discord must match the user who clicked Verify.</p>`,
+      403
+    );
+  }
+  // Guilds (partial objects)
+  const gRes = await fetch("https://discord.com/api/users/@me/guilds", {
+    headers: { Authorization: `Bearer ${access}` },
+  });
+  const guilds = await gRes.json().catch(() => []);
+  if (!Array.isArray(guilds)) {
+    return html(`<h1>Could not read servers</h1><p>Re-authorize and try again.</p>`, 502);
+  }
+  const ids = guilds.map((g) => String(g.id));
+  await ensureOauthTable(env);
+  if (env.DB) {
+    await env.DB.prepare(
+      `INSERT INTO discord_oauth (discord_id, guild_ids, access_token, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(discord_id) DO UPDATE SET
+         guild_ids = excluded.guild_ids,
+         access_token = excluded.access_token,
+         updated_at = excluded.updated_at`
+    )
+      .bind(meId, JSON.stringify(ids), access, Math.floor(Date.now() / 1000))
+      .run();
+  }
+  return html(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Authorized</title>
+<style>body{font-family:system-ui;background:#0c0a08;color:#f0e6c8;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
+.card{background:#1a1510;border:1px solid #3d3420;border-radius:12px;padding:28px 32px;max-width:420px;text-align:center}
+h1{color:#e0c060;font-size:1.3rem}p{opacity:.85;line-height:1.5}</style></head>
+<body><div class="card">
+<h1>Bot authorized</h1>
+<p>Found <b>${ids.length}</b> servers.</p>
+<p>Return to Discord and press <b>Verify</b> again.</p>
+</div></body></html>`);
+}
+
+async function handleOauthStatus(request, env) {
+  const url = new URL(request.url);
+  const discordId = String(url.searchParams.get("discord_id") || "").replace(/\D/g, "");
+  if (!discordId) return json({ ok: false, error: "missing_discord_id" }, 400);
+  await ensureOauthTable(env);
+  if (!env.DB) return json({ ok: false, authorized: false, error: "no_db" }, 500);
+  const row = await env.DB.prepare(
+    `SELECT discord_id, guild_ids, updated_at FROM discord_oauth WHERE discord_id = ? LIMIT 1`
+  )
+    .bind(discordId)
+    .first();
+  if (!row) return json({ ok: true, authorized: false, guild_ids: [] });
+  let guild_ids = [];
+  try {
+    guild_ids = JSON.parse(row.guild_ids || "[]");
+  } catch (_) {}
+  return json({
+    ok: true,
+    authorized: true,
+    guild_ids,
+    updated_at: row.updated_at,
+  });
+}
+
 async function handleDiscordVerifyKey(request, env) {
   if (request.method !== "POST") return json({ ok: false, error: "method_not_allowed" }, 405);
   let body;
@@ -2447,6 +2603,18 @@ export default {
         return await handleAdminKey(request, env, decodeURIComponent(adminKeyMatch[1]));
       }
       
+
+      
+      // DISCORD OAUTH (identify + guilds)
+      if (request.method === "GET" && path === "/api/discord/oauth/start") {
+        return await handleOauthStart(request, env);
+      }
+      if (request.method === "GET" && path === "/api/discord/oauth/callback") {
+        return await handleOauthCallback(request, env);
+      }
+      if (request.method === "GET" && path === "/api/discord/oauth/status") {
+        return await handleOauthStatus(request, env);
+      }
 
       // DISCORD LINK
       if (request.method === "GET" && path === "/api/discord/debug") {
