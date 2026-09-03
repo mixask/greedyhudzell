@@ -2179,16 +2179,25 @@ async function ensureOauthTable(env) {
 
 async function handleOauthStart(request, env) {
   const url = new URL(request.url);
-  const discordId = String(url.searchParams.get("discord_id") || "").replace(/\D/g, "");
+  // Prefer discord_id query; optional fallback from path
+  let discordId = String(url.searchParams.get("discord_id") || "").replace(/\D/g, "");
   if (!discordId || discordId.length < 16) {
-    return json({ ok: false, error: "missing_discord_id" }, 400);
+    return html(
+      `<!doctype html><html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:2rem">
+      <h1>Missing discord_id</h1>
+      <p>Open this from the Discord bot Verify button.</p>
+      </body></html>`,
+      400
+    );
   }
   const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
-  if (!clientId) return json({ ok: false, error: "DISCORD_CLIENT_ID not set" }, 500);
+  if (!clientId) {
+    return html(`<h1>DISCORD_CLIENT_ID not set</h1>`, 500);
+  }
   const redirect = oauthRedirectUri(env, request);
-  const state = discordId; // simple state = discord snowflake
+  const state = discordId;
   const auth = new URL("https://discord.com/api/oauth2/authorize");
-  auth.searchParams.set("client_id", clientId);
+  auth.searchParams.set("client_id", String(clientId));
   auth.searchParams.set("redirect_uri", redirect);
   auth.searchParams.set("response_type", "code");
   auth.searchParams.set("scope", OAUTH_SCOPES);
@@ -2199,26 +2208,44 @@ async function handleOauthStart(request, env) {
 
 async function handleOauthCallback(request, env) {
   const url = new URL(request.url);
+  // Discord returns ?code=...&state=...  (state is our discord_id)
+  // Direct authorize links without state used to show "Missing code" — fixed.
   const code = url.searchParams.get("code");
-  const state = String(url.searchParams.get("state") || "").replace(/\D/g, "");
+  let state = String(url.searchParams.get("state") || "").replace(/\D/g, "");
   const err = url.searchParams.get("error");
+  const errDesc = url.searchParams.get("error_description") || "";
   if (err) {
-    return html(`<h1>Authorization failed</h1><p>${err}</p><p>You can close this tab.</p>`, 400);
+    return html(
+      `<!doctype html><html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:2rem">
+      <h1>Authorization failed</h1>
+      <p><code>${err}</code> ${errDesc}</p>
+      <p>Close this tab and press <b>Verify</b> again in Discord.</p>
+      </body></html>`,
+      400
+    );
   }
-  if (!code || !state) {
-    return html(`<h1>Missing code</h1><p>Try again from Discord.</p>`, 400);
+  if (!code) {
+    return html(
+      `<!doctype html><html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:2rem">
+      <h1>Missing authorization code</h1>
+      <p>Open verification from Discord (Authorize bot), do not bookmark this URL.</p>
+      <p>Expected: <code>/api/discord/oauth/start?discord_id=YOUR_ID</code></p>
+      </body></html>`,
+      400
+    );
   }
   const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
   const clientSecret = env.DISCORD_CLIENT_SECRET || env.CLIENT_SECRET;
   if (!clientId || !clientSecret) {
-    return html(`<h1>Server misconfigured</h1><p>CLIENT_ID / CLIENT_SECRET</p>`, 500);
+    return html(`<h1>Server misconfigured</h1><p>DISCORD_CLIENT_ID / DISCORD_CLIENT_SECRET secrets required.</p>`, 500);
   }
+  // redirect_uri MUST match Discord Developer Portal exactly (and the authorize request)
   const redirect = oauthRedirectUri(env, request);
   const body = new URLSearchParams({
     client_id: clientId,
     client_secret: clientSecret,
     grant_type: "authorization_code",
-    code,
+    code: code,
     redirect_uri: redirect,
   });
   const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
@@ -2229,32 +2256,42 @@ async function handleOauthCallback(request, env) {
   const tokenJson = await tokenRes.json().catch(() => ({}));
   if (!tokenRes.ok || !tokenJson.access_token) {
     return html(
-      `<h1>Token exchange failed</h1><pre>${JSON.stringify(tokenJson).slice(0, 400)}</pre>`,
+      `<!doctype html><html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:2rem">
+      <h1>Token exchange failed</h1>
+      <p>Usually redirect_uri mismatch. Portal must have exactly:</p>
+      <pre>${redirect}</pre>
+      <pre>${JSON.stringify(tokenJson).slice(0, 500)}</pre>
+      </body></html>`,
       502
     );
   }
   const access = tokenJson.access_token;
-  // Confirm identity
   const meRes = await fetch("https://discord.com/api/users/@me", {
     headers: { Authorization: `Bearer ${access}` },
   });
   const me = await meRes.json().catch(() => ({}));
-  const meId = String(me.id || "");
-  if (!meId || meId !== state) {
+  const meId = String(me.id || "").replace(/\D/g, "");
+  if (!meId) {
+    return html(`<h1>Could not read Discord user</h1>`, 502);
+  }
+  // If state was sent, it must match; if omitted (old links), trust /@me id
+  if (state && state !== meId) {
     return html(
-      `<h1>Account mismatch</h1><p>Authorized Discord must match the user who clicked Verify.</p>`,
+      `<h1>Account mismatch</h1>
+      <p>Authorized account <code>${meId}</code> does not match the Discord user who started verify (<code>${state}</code>).</p>`,
       403
     );
   }
-  // Guilds (partial objects)
+  state = meId;
+
   const gRes = await fetch("https://discord.com/api/users/@me/guilds", {
     headers: { Authorization: `Bearer ${access}` },
   });
   const guilds = await gRes.json().catch(() => []);
-  if (!Array.isArray(guilds)) {
-    return html(`<h1>Could not read servers</h1><p>Re-authorize and try again.</p>`, 502);
-  }
-  const ids = guilds.map((g) => String(g.id));
+  const guildIds = Array.isArray(guilds)
+    ? guilds.map((g) => String(g.id)).filter(Boolean)
+    : [];
+
   await ensureOauthTable(env);
   if (env.DB) {
     await env.DB.prepare(
@@ -2265,18 +2302,21 @@ async function handleOauthCallback(request, env) {
          access_token = excluded.access_token,
          updated_at = excluded.updated_at`
     )
-      .bind(meId, JSON.stringify(ids), access, Math.floor(Date.now() / 1000))
+      .bind(state, JSON.stringify(guildIds), access, Math.floor(Date.now() / 1000))
       .run();
   }
-  return html(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Authorized</title>
-<style>body{font-family:system-ui;background:#0c0a08;color:#f0e6c8;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
-.card{background:#1a1510;border:1px solid #3d3420;border-radius:12px;padding:28px 32px;max-width:420px;text-align:center}
-h1{color:#e0c060;font-size:1.3rem}p{opacity:.85;line-height:1.5}</style></head>
-<body><div class="card">
-<h1>Bot authorized</h1>
-<p>Found <b>${ids.length}</b> servers.</p>
-<p>Return to Discord and press <b>Verify</b> again.</p>
-</div></body></html>`);
+
+  return html(
+    `<!doctype html><html><body style="font-family:system-ui;background:#0b0b0b;color:#eee;padding:2rem;text-align:center">
+    <h1 style="color:#d4af37">Connected</h1>
+    <p>Discord <b>${me.username || state}</b> authorized.</p>
+    <p>Servers seen: <b>${guildIds.length}</b></p>
+    <p>Return to Discord and press <b>Verify</b> again.</p>
+    <p style="opacity:.6;font-size:12px">You can close this tab.</p>
+    <script>try{window.close()}catch(e){}</script>
+    </body></html>`,
+    200
+  );
 }
 
 async function handleOauthStatus(request, env) {
