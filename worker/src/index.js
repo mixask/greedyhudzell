@@ -370,6 +370,9 @@ async function handleValidate(request, env) {
   if (!record) return json({ valid: false, reason: "invalid_key" });
   if (record.revoked === 1) return json({ valid: false, reason: "revoked" });
   if (Number(record.expires_at) <= now()) return json({ valid: false, reason: "expired" });
+  if (await isBanned(env, key, username)) {
+    return json({ valid: false, reason: "banned", message: "Key or username is banned from GH." });
+  }
 
   // Keys start inactive; Discord Verify sets activated = 1
   // Legacy rows: activated NULL → allow if already executed/discord linked
@@ -2540,6 +2543,236 @@ async function handleDiscordRewire(request, env) {
 }
 
 
+
+/* ===================== BANS / KICKS / WEBHOOKS ===================== */
+async function ensureBanTables(env) {
+  if (!env.DB) return;
+  try {
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS bans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT,
+        username TEXT,
+        reason TEXT,
+        by_discord TEXT,
+        created_at INTEGER
+      )`
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS pending_kicks (
+        user_id TEXT PRIMARY KEY,
+        reason TEXT,
+        created_at INTEGER
+      )`
+    ).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS webhooks_meta (
+        webhook_id TEXT PRIMARY KEY,
+        url TEXT,
+        roblox_name TEXT,
+        discord_id TEXT,
+        created_at INTEGER
+      )`
+    ).run();
+  } catch (e) {
+    console.error("ensureBanTables", e);
+  }
+}
+
+async function isBanned(env, key, username) {
+  await ensureBanTables(env);
+  const k = (key || "").trim();
+  const u = (username || "").trim().toLowerCase();
+  try {
+    if (k) {
+      const row = await env.DB.prepare(`SELECT 1 AS x FROM bans WHERE key = ? LIMIT 1`).bind(k).first();
+      if (row) return true;
+    }
+    if (u) {
+      const row = await env.DB.prepare(
+        `SELECT 1 AS x FROM bans WHERE lower(username) = ? LIMIT 1`
+      )
+        .bind(u)
+        .first();
+      if (row) return true;
+    }
+  } catch (e) {
+    console.error("isBanned", e);
+  }
+  return false;
+}
+
+async function handleAdminBan(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  await ensureBanTables(env);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  const reason = body.reason || "";
+  const by = String(body.by_discord || "");
+  if (!key && !username) return json({ success: false, reason: "need key or username" }, 400);
+  const ts = now();
+  await env.DB.prepare(
+    `INSERT INTO bans (key, username, reason, by_discord, created_at) VALUES (?, ?, ?, ?, ?)`
+  )
+    .bind(key || null, username || null, reason, by, ts)
+    .run();
+  if (key) {
+    try {
+      await env.DB.prepare(`UPDATE keys SET revoked = 1 WHERE key = ?`).bind(key).run();
+    } catch (_) {}
+  }
+  return json({ success: true });
+}
+
+async function handleAdminUnban(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  await ensureBanTables(env);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!key && !username) return json({ success: false, reason: "need key or username" }, 400);
+  if (key) {
+    await env.DB.prepare(`DELETE FROM bans WHERE key = ?`).bind(key).run();
+    try {
+      await env.DB.prepare(`UPDATE keys SET revoked = 0 WHERE key = ?`).bind(key).run();
+    } catch (_) {}
+  }
+  if (username) {
+    await env.DB.prepare(`DELETE FROM bans WHERE lower(username) = lower(?)`).bind(username).run();
+  }
+  return json({ success: true });
+}
+
+async function handleAdminKick(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  await ensureBanTables(env);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const userId = String(body.user_id || "");
+  const reason = String(body.reason || "Kicked by moderator");
+  if (!userId) return json({ success: false, reason: "user_id" }, 400);
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO pending_kicks (user_id, reason, created_at) VALUES (?, ?, ?)`
+  )
+    .bind(userId, reason, now())
+    .run();
+  return json({ success: true });
+}
+
+async function handleKickCheck(request, env, url) {
+  await ensureBanTables(env);
+  const userId = url.searchParams.get("userId") || "";
+  if (!userId) return json({ kick: false });
+  const row = await env.DB.prepare(`SELECT reason FROM pending_kicks WHERE user_id = ?`)
+    .bind(userId)
+    .first();
+  if (!row) return json({ kick: false });
+  await env.DB.prepare(`DELETE FROM pending_kicks WHERE user_id = ?`).bind(userId).run();
+  return json({ kick: true, reason: row.reason });
+}
+
+async function handleWebhookRegister(request, env) {
+  if (!adminAuthorized(request, env)) return json({ success: false, reason: "unauthorized" }, 401);
+  await ensureBanTables(env);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, reason: "invalid_json" }, 400);
+  }
+  const webhookId = String(body.webhook_id || "");
+  const whUrl = String(body.url || "");
+  if (!webhookId || !whUrl) return json({ success: false, reason: "webhook_id+url" }, 400);
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO webhooks_meta (webhook_id, url, roblox_name, discord_id, created_at) VALUES (?, ?, ?, ?, ?)`
+  )
+    .bind(webhookId, whUrl, body.roblox_name || "", body.discord_id || "", now())
+    .run();
+  return json({ success: true });
+}
+
+async function handleCreateWebhook(request, env) {
+  await ensureBanTables(env);
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "invalid_json" }, 400);
+  }
+  const key = typeof body.key === "string" ? body.key.trim() : "";
+  const username = typeof body.username === "string" ? body.username.trim() : "";
+  if (!key || !username) return json({ ok: false, error: "key+username" }, 400);
+  if (await isBanned(env, key, username)) return json({ ok: false, error: "banned" }, 403);
+  const token = env.DISCORD_BOT_TOKEN || env.DISCORD_TOKEN;
+  if (!token) return json({ ok: false, error: "no bot token" }, 500);
+  const channelId = "1546938830333153321";
+  const name = username.replace(/[^\w\- ]/g, "").slice(0, 80) || "gh-user";
+  const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/webhooks`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bot ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return json({ ok: false, error: data }, 502);
+  const urlWh = `https://discord.com/api/webhooks/${data.id}/${data.token}`;
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO webhooks_meta (webhook_id, url, roblox_name, discord_id, created_at) VALUES (?, ?, ?, ?, ?)`
+  )
+    .bind(String(data.id), urlWh, username, body.discord_id || "", now())
+    .run();
+  return json({ ok: true, url: urlWh });
+}
+
+async function handleSessionJoin(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "invalid_json" }, 400);
+  }
+  const token = env.DISCORD_BOT_TOKEN || env.DISCORD_TOKEN;
+  if (!token) return json({ ok: false, error: "no bot token" }, 500);
+  const ch = "1438999670075686912";
+  const content =
+    `**Session**\n` +
+    `Roblox: \`${body.roblox_user || "?"}\` (${body.roblox_id || "?"})\n` +
+    `Discord: \`${body.discord_name || "-"}\` (${body.discord_id || "-"})\n` +
+    `Key: \`${body.key || "-"}\` plan=${body.plan || "-"} place=${body.place_id || "-"}`;
+  try {
+    await fetch(`https://discord.com/api/v10/channels/${ch}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ content }),
+    });
+  } catch (e) {
+    console.error("session join post", e);
+    return json({ ok: false, error: "discord_post_failed" }, 502);
+  }
+  return json({ ok: true });
+}
+
+
 export default {
   async fetch(request, env) {
     try {
@@ -2636,7 +2869,14 @@ export default {
       if (request.method === "POST" && path === "/admin/generate") return await handleAdminGenerate(request, env);
       if (request.method === "POST" && path === "/admin/renew") return await handleAdminRenew(request, env);
       if (request.method === "POST" && path === "/admin/revoke") return await handleAdminRevoke(request, env);
+      if (request.method === "POST" && path === "/admin/ban") return await handleAdminBan(request, env);
+      if (request.method === "POST" && path === "/admin/unban") return await handleAdminUnban(request, env);
+      if (request.method === "POST" && path === "/admin/kick") return await handleAdminKick(request, env);
+      if (request.method === "POST" && path === "/admin/webhook-register") return await handleWebhookRegister(request, env);
       if (request.method === "POST" && path === "/admin/rewire") return await handleAdminRewire(request, env);
+      if (request.method === "GET" && path === "/api/session/kick-check") return await handleKickCheck(request, env, url);
+      if (request.method === "POST" && path === "/api/discord/create-webhook") return await handleCreateWebhook(request, env);
+      if (request.method === "POST" && path === "/api/session/join") return await handleSessionJoin(request, env);
       if (request.method === "GET" && path === "/admin/stats") return await handleAdminStats(request, env);
       const adminKeyMatch = path.match(/^\/admin\/key\/(.+)$/);
       if (request.method === "GET" && adminKeyMatch) {
