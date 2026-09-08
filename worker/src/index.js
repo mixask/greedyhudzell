@@ -372,8 +372,15 @@ async function handleValidate(request, env) {
   if (!record) return json({ valid: false, reason: "invalid_key" });
   if (record.revoked === 1) return json({ valid: false, reason: "revoked" });
   if (Number(record.expires_at) <= now()) return json({ valid: false, reason: "expired" });
-  if (await isBanned(env, key, username)) {
-    return json({ valid: false, reason: "banned", message: "Key or username is banned from GH." });
+  {
+    const ban = await isBanned(env, key, username, body.user_id || body.userId || body.roblox_id);
+    if (ban) {
+      return json({
+        valid: false,
+        reason: "banned",
+        message: ban.reason || "Key, username or userId is banned from GH.",
+      });
+    }
   }
 
   // Keys start inactive; Discord Verify sets activated = 1
@@ -2555,11 +2562,15 @@ async function ensureBanTables(env) {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         key TEXT,
         username TEXT,
+        user_id TEXT,
         reason TEXT,
         by_discord TEXT,
         created_at INTEGER
       )`
     ).run();
+    try {
+      await env.DB.prepare(`ALTER TABLE bans ADD COLUMN user_id TEXT`).run();
+    } catch (_) {}
     await env.DB.prepare(
       `CREATE TABLE IF NOT EXISTS pending_kicks (
         user_id TEXT PRIMARY KEY,
@@ -2581,22 +2592,31 @@ async function ensureBanTables(env) {
   }
 }
 
-async function isBanned(env, key, username) {
+async function isBanned(env, key, username, userId) {
   await ensureBanTables(env);
   const k = (key || "").trim();
   const u = (username || "").trim().toLowerCase();
+  const uid = String(userId || "").trim();
   try {
     if (k) {
-      const row = await env.DB.prepare(`SELECT 1 AS x FROM bans WHERE key = ? LIMIT 1`).bind(k).first();
-      if (row) return true;
+      const row = await env.DB.prepare(`SELECT reason FROM bans WHERE key = ? LIMIT 1`).bind(k).first();
+      if (row) return { banned: true, reason: row.reason || "banned" };
     }
     if (u) {
       const row = await env.DB.prepare(
-        `SELECT 1 AS x FROM bans WHERE lower(username) = ? LIMIT 1`
+        `SELECT reason FROM bans WHERE lower(username) = ? LIMIT 1`
       )
         .bind(u)
         .first();
-      if (row) return true;
+      if (row) return { banned: true, reason: row.reason || "banned" };
+    }
+    if (uid) {
+      const row = await env.DB.prepare(
+        `SELECT reason FROM bans WHERE user_id = ? LIMIT 1`
+      )
+        .bind(uid)
+        .first();
+      if (row) return { banned: true, reason: row.reason || "banned" };
     }
   } catch (e) {
     console.error("isBanned", e);
@@ -2615,21 +2635,32 @@ async function handleAdminBan(request, env) {
   }
   const key = typeof body.key === "string" ? body.key.trim() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
-  const reason = body.reason || "";
+  const userId = String(body.user_id || body.userId || body.roblox_id || "").trim();
+  const reason = body.reason || "Banned from Greedy Hudzell";
   const by = String(body.by_discord || "");
-  if (!key && !username) return json({ success: false, reason: "need key or username" }, 400);
+  if (!key && !username && !userId) return json({ success: false, reason: "need key, username or user_id" }, 400);
   const ts = now();
   await env.DB.prepare(
-    `INSERT INTO bans (key, username, reason, by_discord, created_at) VALUES (?, ?, ?, ?, ?)`
+    `INSERT INTO bans (key, username, user_id, reason, by_discord, created_at) VALUES (?, ?, ?, ?, ?, ?)`
   )
-    .bind(key || null, username || null, reason, by, ts)
+    .bind(key || null, username || null, userId || null, reason, by, ts)
     .run();
   if (key) {
     try {
       await env.DB.prepare(`UPDATE keys SET revoked = 1 WHERE key = ?`).bind(key).run();
     } catch (_) {}
   }
-  return json({ success: true });
+  // Immediate kick for online sessions
+  if (userId) {
+    try {
+      await env.DB.prepare(
+        `INSERT OR REPLACE INTO pending_kicks (user_id, reason, created_at) VALUES (?, ?, ?)`
+      )
+        .bind(userId, reason, ts)
+        .run();
+    } catch (_) {}
+  }
+  return json({ success: true, key: key || null, username: username || null, user_id: userId || null });
 }
 
 async function handleAdminUnban(request, env) {
@@ -2643,7 +2674,8 @@ async function handleAdminUnban(request, env) {
   }
   const key = typeof body.key === "string" ? body.key.trim() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
-  if (!key && !username) return json({ success: false, reason: "need key or username" }, 400);
+  const userId = String(body.user_id || body.userId || body.roblox_id || "").trim();
+  if (!key && !username && !userId) return json({ success: false, reason: "need key, username or user_id" }, 400);
   if (key) {
     await env.DB.prepare(`DELETE FROM bans WHERE key = ?`).bind(key).run();
     try {
@@ -2652,6 +2684,10 @@ async function handleAdminUnban(request, env) {
   }
   if (username) {
     await env.DB.prepare(`DELETE FROM bans WHERE lower(username) = lower(?)`).bind(username).run();
+  }
+  if (userId) {
+    await env.DB.prepare(`DELETE FROM bans WHERE user_id = ?`).bind(userId).run();
+    await env.DB.prepare(`DELETE FROM pending_kicks WHERE user_id = ?`).bind(userId).run();
   }
   return json({ success: true });
 }
@@ -2679,13 +2715,27 @@ async function handleAdminKick(request, env) {
 async function handleKickCheck(request, env, url) {
   await ensureBanTables(env);
   const userId = url.searchParams.get("userId") || "";
-  if (!userId) return json({ kick: false });
+  const username = (url.searchParams.get("username") || "").trim();
+  const key = (url.searchParams.get("key") || "").trim();
+  if (!userId && !username && !key) return json({ kick: false, banned: false });
+
+  // Live ban check (username / key / userId)
+  const ban = await isBanned(env, key, username, userId);
+  if (ban) {
+    return json({
+      kick: true,
+      banned: true,
+      reason: ban.reason || "You are banned from Greedy Hudzell",
+    });
+  }
+
+  if (!userId) return json({ kick: false, banned: false });
   const row = await env.DB.prepare(`SELECT reason FROM pending_kicks WHERE user_id = ?`)
     .bind(userId)
     .first();
-  if (!row) return json({ kick: false });
+  if (!row) return json({ kick: false, banned: false });
   await env.DB.prepare(`DELETE FROM pending_kicks WHERE user_id = ?`).bind(userId).run();
-  return json({ kick: true, reason: row.reason });
+  return json({ kick: true, banned: false, reason: row.reason });
 }
 
 async function handleWebhookRegister(request, env) {
@@ -2719,7 +2769,7 @@ async function handleCreateWebhook(request, env) {
   const key = typeof body.key === "string" ? body.key.trim() : "";
   const username = typeof body.username === "string" ? body.username.trim() : "";
   if (!key || !username) return json({ ok: false, error: "key+username" }, 400);
-  if (await isBanned(env, key, username)) return json({ ok: false, error: "banned" }, 403);
+  if (await isBanned(env, key, username, body.user_id || body.roblox_id)) return json({ ok: false, error: "banned" }, 403);
   const token = env.DISCORD_BOT_TOKEN || env.DISCORD_TOKEN;
   if (!token) return json({ ok: false, error: "no bot token" }, 500);
   const channelId = "1546938830333153321";
