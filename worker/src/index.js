@@ -36,6 +36,8 @@ const GAMEPASS_STORE = {
 };
 const DISCORD_REDEEM_CHANNEL = "https://discord.com/channels/1422222409846620201/1448630361390055454";
 const DISCORD_INVITE = "https://discord.gg/sbVuaT9a2T";
+/** Public Discord application id (OAuth). Secret stays in env only. */
+const DEFAULT_DISCORD_CLIENT_ID = "1426282728520679454";
 const FREE_KEY_LINK = "https://work.ink/28wp/Greedy-hudzell";
 
 const REDEEM_SUPPORT_HINT =
@@ -2193,9 +2195,9 @@ async function handleOauthStart(request, env) {
       400
     );
   }
-  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
+  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID || DEFAULT_DISCORD_CLIENT_ID;
   if (!clientId) {
-    return html(`<h1>DISCORD_CLIENT_ID not set</h1>`, 500);
+    return html(`<h1>DISCORD_CLIENT_ID not set</h1><p>Set secret or use built-in default.</p>`, 500);
   }
   const redirect = oauthRedirectUri(env, request);
   const state = discordId;
@@ -2237,7 +2239,7 @@ async function handleOauthCallback(request, env) {
       400
     );
   }
-  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID;
+  const clientId = env.DISCORD_CLIENT_ID || env.CLIENT_ID || DEFAULT_DISCORD_CLIENT_ID;
   const clientSecret = env.DISCORD_CLIENT_SECRET || env.CLIENT_SECRET;
   if (!clientId || !clientSecret) {
     return html(`<h1>Server misconfigured</h1><p>DISCORD_CLIENT_ID / DISCORD_CLIENT_SECRET secrets required.</p>`, 500);
